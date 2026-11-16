@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563EB" />
+      <stop offset="100%" stop-color="#4F46E5" />
+    </linearGradient>
+    <linearGradient id="glowGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#60A5FA" />
+      <stop offset="100%" stop-color="#38BDF8" />
+    </linearGradient>
+  </defs>
+  <!-- Background Rounded Shield -->
+  <rect width="512" height="512" rx="128" fill="url(#bgGrad)" />
+  <!-- Stylized PixiForge 'P' + Sparkle Layers -->
+  <path d="M160 120 H280 C340 120 380 155 380 215 C380 275 340 310 280 310 H224 V392 C224 402 216 410 206 410 H178 C168 410 160 402 160 392 V120 Z M224 176 V254 H276 C304 254 322 238 322 215 C322 192 304 176 276 176 H224 Z" fill="#FFFFFF" />
+  <!-- Sparkle Accent -->
+  <path d="M375 105 C375 125 390 140 410 140 C390 140 375 155 375 175 C375 155 360 140 340 140 C360 140 375 125 375 105 Z" fill="url(#glowGrad)" />
+</svg>

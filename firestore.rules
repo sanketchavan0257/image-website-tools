@@ -1,0 +1,101 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default-deny all access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.uid == '0sjW8nUYlSh4n1k9tpySs3KQm3C2' ||
+        (request.auth.token.email == 'sanketchavan0257@gmail.com' &&
+         request.auth.token.email_verified == true) ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.plan in ['free', 'pro', 'max', 'ultra'] &&
+             (!('email' in data) || data.email == null || (data.email is string && data.email.size() <= 150)) &&
+             (!('phone' in data) || data.phone == null || (data.phone is string && data.phone.size() <= 50)) &&
+             (!('billingCycle' in data) || data.billingCycle == null || data.billingCycle in ['monthly', '3months', '6months', 'yearly']) &&
+             (!('planExpiresAt' in data) || data.planExpiresAt == null || (data.planExpiresAt is string && data.planExpiresAt.size() <= 64)) &&
+             (!('autoPayEnabled' in data) || data.autoPayEnabled is bool) &&
+             (!('autoPayStatus' in data) || data.autoPayStatus == null || data.autoPayStatus in ['active', 'pending_mandate', 'cancelled', 'off']) &&
+             (!('subscriptionId' in data) || data.subscriptionId == null || (data.subscriptionId is string && data.subscriptionId.size() <= 128)) &&
+             (!('autoPayUpdatedAt' in data) || data.autoPayUpdatedAt == null || (data.autoPayUpdatedAt is string && data.autoPayUpdatedAt.size() <= 64)) &&
+             (!('lastPaymentId' in data) || data.lastPaymentId == null || (data.lastPaymentId is string && data.lastPaymentId.size() <= 128)) &&
+             (!('lastPaymentAmount' in data) || data.lastPaymentAmount == null || data.lastPaymentAmount is number) &&
+             (!('lastPaymentDate' in data) || data.lastPaymentDate == null || (data.lastPaymentDate is string && data.lastPaymentDate.size() <= 64)) &&
+             (!('paymentHistory' in data) || data.paymentHistory == null || (data.paymentHistory is list && data.paymentHistory.size() <= 20));
+    }
+
+    function isValidSiteView(data, viewId) {
+      return data.keys().hasAll(['viewId', 'userId', 'country', 'state', 'dist', 'taluka', 'pagePath', 'visitedAt']) &&
+             data.keys().hasOnly(['viewId', 'userId', 'country', 'state', 'dist', 'taluka', 'pagePath', 'visitedAt', 'locationSource', 'accuracyMeters', 'locationCleared']) &&
+             data.viewId is string && data.viewId == viewId &&
+             data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+             data.country is string && data.country.size() > 0 && data.country.size() <= 80 &&
+             data.state is string && data.state.size() > 0 && data.state.size() <= 80 &&
+             data.dist is string && data.dist.size() > 0 && data.dist.size() <= 80 &&
+             data.taluka is string && data.taluka.size() > 0 && data.taluka.size() <= 80 &&
+             data.pagePath is string && data.pagePath.size() > 0 && data.pagePath.size() <= 200 &&
+             data.visitedAt is string && data.visitedAt.size() > 0 && data.visitedAt.size() <= 64 &&
+             (!('locationSource' in data) || data.locationSource in ['gps', 'ip', 'pincode']) &&
+             (!('accuracyMeters' in data) || (data.accuracyMeters is number && data.accuracyMeters >= 0 && data.accuracyMeters <= 20000000)) &&
+             (!('locationCleared' in data) || data.locationCleared is bool);
+    }
+
+    match /admins/{adminId} {
+      allow get: if isOwner(adminId) || isAdmin();
+      allow list, create, update, delete: if false;
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(userId) && isValidId(userId) && isValidUserProfile(incoming(), userId);
+      allow update: if (isOwner(userId) || isAdmin()) && isValidId(userId) &&
+                    isValidUserProfile(incoming(), userId) &&
+                    incoming().userId == existing().userId;
+      allow delete: if false;
+    }
+
+    match /site_views/{viewId} {
+      allow get, list: if isAdmin();
+      allow create: if isSignedIn() && isValidId(viewId) && isValidSiteView(incoming(), viewId) &&
+                    incoming().userId == request.auth.uid;
+      allow update: if isSignedIn() && isValidId(viewId) && isValidSiteView(incoming(), viewId) &&
+                    incoming().userId == existing().userId &&
+                    incoming().viewId == existing().viewId &&
+                    incoming().pagePath == existing().pagePath &&
+                    incoming().visitedAt == existing().visitedAt &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['country', 'state', 'dist', 'taluka', 'locationSource', 'accuracyMeters', 'locationCleared']) &&
+                    (isAdmin() || existing().userId == request.auth.uid);
+      allow delete: if isAdmin() && isValidId(viewId);
+    }
+  }
+}

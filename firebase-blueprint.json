@@ -1,0 +1,146 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User account profile details including email or phone number and selected plan",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The unique Firebase Auth UID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the user"
+        },
+        "email": {
+          "type": "string",
+          "description": "Email address of the user"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Phone number with country code"
+        },
+        "plan": {
+          "type": "string",
+          "description": "User current subscription plan",
+          "enum": ["free", "pro", "max", "ultra"]
+        },
+        "billingCycle": {
+          "type": "string",
+          "description": "Subscription duration billing cycle",
+          "enum": ["monthly", "3months", "6months", "yearly"]
+        },
+        "planExpiresAt": {
+          "type": "string",
+          "description": "ISO timestamp when the active paid plan expires"
+        },
+        "autoPayEnabled": {
+          "type": "boolean",
+          "description": "Whether recurring AutoPay renewal is enabled for the active membership"
+        },
+        "autoPayStatus": {
+          "type": "string",
+          "description": "Current status of the AutoPay mandate",
+          "enum": ["active", "pending_mandate", "cancelled", "off"]
+        },
+        "subscriptionId": {
+          "type": "string",
+          "description": "Razorpay subscription or AutoPay mandate reference ID"
+        },
+        "autoPayUpdatedAt": {
+          "type": "string",
+          "description": "ISO timestamp when AutoPay state was last changed"
+        },
+        "lastPaymentId": {
+          "type": "string",
+          "description": "Latest Razorpay payment transaction ID"
+        },
+        "lastPaymentAmount": {
+          "type": "number",
+          "description": "Latest Razorpay payment amount in INR"
+        },
+        "lastPaymentDate": {
+          "type": "string",
+          "description": "ISO timestamp of latest payment"
+        },
+        "paymentHistory": {
+          "type": "array",
+          "description": "Recent Razorpay payment and pro-rata refund records"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Account creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last profile update timestamp"
+        }
+      },
+      "required": ["userId", "name", "plan"]
+    },
+    "SiteView": {
+      "title": "SiteView",
+      "description": "Website visit analytics record with administrative location (country, state, district, taluka) and visit timestamp",
+      "type": "object",
+      "properties": {
+        "viewId": {
+          "type": "string",
+          "description": "Unique visit identifier"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the visitor"
+        },
+        "country": {
+          "type": "string",
+          "description": "Visitor country"
+        },
+        "state": {
+          "type": "string",
+          "description": "Visitor state or region"
+        },
+        "dist": {
+          "type": "string",
+          "description": "Visitor district"
+        },
+        "taluka": {
+          "type": "string",
+          "description": "Visitor taluka or sub-district"
+        },
+        "pagePath": {
+          "type": "string",
+          "description": "Visited route path"
+        },
+        "visitedAt": {
+          "type": "string",
+          "description": "ISO timestamp when the website view occurred"
+        },
+        "locationSource": {
+          "type": "string",
+          "enum": ["gps", "ip", "pincode"],
+          "description": "Location resolution method: device geolocation (gps), postal pincode (pincode), or ISP IP fallback (ip)"
+        },
+        "accuracyMeters": {
+          "type": "number",
+          "description": "Optional geolocation accuracy radius in meters"
+        },
+        "locationCleared": {
+          "type": "boolean",
+          "description": "Whether location details were cleared by admin while preserving the visit count"
+        }
+      },
+      "required": ["viewId", "userId", "country", "state", "dist", "taluka", "pagePath", "visitedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Stores user profile and plan subscription settings"
+    },
+    "/site_views/{viewId}": {
+      "schema": "SiteView",
+      "description": "Stores website visit counts, administrative locations, and timestamps"
+    }
+  }
+}
