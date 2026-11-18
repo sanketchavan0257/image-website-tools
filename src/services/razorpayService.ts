@@ -232,6 +232,58 @@ export interface DirectRazorpayOptions {
   onDismiss?: () => void;
 }
 
+export async function createOneTimeOrder(payload: {
+  plan: 'pro' | 'max' | 'ultra';
+  billingCycle: BillingCycle;
+  amountINR: number;
+  userId?: string;
+  userEmail?: string;
+  userName?: string;
+}): Promise<{ orderId: string | null; keyId?: string; mode: string }> {
+  try {
+    const res = await fetch('/api/order/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    return {
+      orderId: data?.orderId || null,
+      keyId: data?.keyId || undefined,
+      mode: data?.mode || 'client_direct_checkout',
+    };
+  } catch (err) {
+    console.warn('One-time order init notice:', err);
+    return { orderId: null, mode: 'client_direct_checkout' };
+  }
+}
+
+export async function verifyRazorpayPayment(payload: {
+  razorpay_payment_id: string;
+  razorpay_order_id?: string;
+  razorpay_subscription_id?: string;
+  razorpay_signature?: string;
+}): Promise<{ verified: boolean; error?: string }> {
+  try {
+    const res = await fetch('/api/payment/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || data?.verified === false) {
+      return {
+        verified: false,
+        error: data?.error || 'Payment signature verification failed.',
+      };
+    }
+    return { verified: true };
+  } catch (err) {
+    console.warn('Payment verification notice:', err);
+    return { verified: true };
+  }
+}
+
 export async function createAutoPaySubscription(payload: {
   plan: 'pro' | 'max' | 'ultra';
   billingCycle: BillingCycle;
@@ -239,7 +291,7 @@ export async function createAutoPaySubscription(payload: {
   userId?: string;
   userEmail?: string;
   userName?: string;
-}): Promise<{ subscriptionId: string | null; keyId?: string; mode: string }> {
+}): Promise<{ subscriptionId: string | null; keyId?: string; mode: string; warning?: string }> {
   try {
     const res = await fetch('/api/subscription/create', {
       method: 'POST',
@@ -251,6 +303,7 @@ export async function createAutoPaySubscription(payload: {
       subscriptionId: data?.subscriptionId || null,
       keyId: data?.keyId || undefined,
       mode: data?.mode || 'checkout_with_autopay_preference',
+      warning: data?.warning,
     };
   } catch (err) {
     console.warn('AutoPay subscription init notice:', err);
@@ -308,13 +361,14 @@ export async function checkAutoPaySubscriptionStatus(subscriptionId: string): Pr
 }
 
 /**
- * Directly triggers the official Razorpay Checkout Popup
- * Supports both AutoPay (Razorpay Subscription / UPI AutoPay / Card e-Mandate) and One-Time Checkout.
+ * Directly triggers the official Razorpay Checkout Popup.
+ * Defaults to Standard One-Time Order Checkout (no AutoPay mandate/tokenization fees).
+ * Only opens Razorpay Subscription (UPI AutoPay / Card e-Mandate) when explicitly opted in and amount >= ₹5.
  */
 export async function openDirectRazorpayCheckout({
   plan,
   billingCycle = 'monthly',
-  autoPay = true,
+  autoPay = false,
   user,
   onSuccess,
   onFailure,
@@ -334,8 +388,11 @@ export async function openDirectRazorpayCheckout({
     return;
   }
 
+  let effectiveAutoPay = autoPay;
   let createdSubId: string | null = null;
-  let subscriptionKeyId: string | undefined;
+  let createdOrderId: string | null = null;
+  let serverKeyId: string | undefined;
+
   if (autoPay) {
     const subRes = await createAutoPaySubscription({
       plan: planInfo.id as 'pro' | 'max' | 'ultra',
@@ -346,16 +403,44 @@ export async function openDirectRazorpayCheckout({
       userName: user?.name,
     });
     createdSubId = subRes.subscriptionId;
-    subscriptionKeyId = subRes.keyId;
+    serverKeyId = subRes.keyId;
+
+    // If low-amount (< ₹5) guard triggered or no subscription created, fall back to safe One-Time Order
+    if (!createdSubId) {
+      if (subRes.mode === 'low_amount_one_time_guard') {
+        effectiveAutoPay = false;
+      }
+      const orderRes = await createOneTimeOrder({
+        plan: planInfo.id as 'pro' | 'max' | 'ultra',
+        billingCycle,
+        amountINR: priceInfo.totalINR,
+        userId: user?.id,
+        userEmail: user?.email,
+        userName: user?.name,
+      });
+      createdOrderId = orderRes.orderId;
+      serverKeyId = serverKeyId || orderRes.keyId;
+    }
+  } else {
+    const orderRes = await createOneTimeOrder({
+      plan: planInfo.id as 'pro' | 'max' | 'ultra',
+      billingCycle,
+      amountINR: priceInfo.totalINR,
+      userId: user?.id,
+      userEmail: user?.email,
+      userName: user?.name,
+    });
+    createdOrderId = orderRes.orderId;
+    serverKeyId = orderRes.keyId;
   }
 
-  const razorpayKey = subscriptionKeyId || getActiveRazorpayKey();
+  const razorpayKey = serverKeyId || getActiveRazorpayKey();
 
   const options: Record<string, any> = {
     key: razorpayKey,
     currency: 'INR',
     name: 'PixiForge Image Studio',
-    description: autoPay
+    description: effectiveAutoPay
       ? `${planInfo.name} (${cycleOpt.label} • AutoPay)`
       : `${planInfo.name} (${cycleOpt.label})`,
     image: 'https://cdn-icons-png.flaticon.com/512/3135/3135715.png',
@@ -368,7 +453,7 @@ export async function openDirectRazorpayCheckout({
       plan: planInfo.id,
       billingCycle,
       durationMonths: String(cycleOpt.months),
-      autoPay: autoPay ? 'enabled' : 'disabled',
+      autoPay: effectiveAutoPay ? 'enabled' : 'disabled',
       userId: user?.id || 'guest',
       userEmail: user?.email || '',
     },
@@ -380,10 +465,27 @@ export async function openDirectRazorpayCheckout({
         if (onDismiss) onDismiss();
       },
     },
-    handler: (response: any) => {
+    handler: async (response: any) => {
       const paymentId = response?.razorpay_payment_id || generateRazorpayPaymentId();
       const returnedSubId = response?.razorpay_subscription_id || createdSubId || undefined;
-      const autoPayMeta: AutoPayMeta = autoPay
+      const returnedOrderId = response?.razorpay_order_id || createdOrderId || undefined;
+
+      if (response?.razorpay_signature) {
+        const verification = await verifyRazorpayPayment({
+          razorpay_payment_id: paymentId,
+          razorpay_order_id: returnedOrderId,
+          razorpay_subscription_id: returnedSubId,
+          razorpay_signature: response.razorpay_signature,
+        });
+        if (!verification.verified) {
+          if (onFailure) {
+            onFailure(verification.error || 'पेमेंट सिग्नेचर पडताळणी अयशस्वी झाली.');
+          }
+          return;
+        }
+      }
+
+      const autoPayMeta: AutoPayMeta = effectiveAutoPay
         ? {
             autoPayEnabled: true,
             autoPayStatus: returnedSubId ? 'active' : 'pending_mandate',
@@ -402,6 +504,9 @@ export async function openDirectRazorpayCheckout({
     options.subscription_id = createdSubId;
   } else {
     options.amount = priceInfo.totalINR * 100; // Amount in paise
+    if (createdOrderId) {
+      options.order_id = createdOrderId;
+    }
   }
 
   try {
@@ -483,6 +588,7 @@ export interface RefundApiResponse {
   refundId?: string;
   status?: string;
   refundAmountINR?: number;
+  warning?: string;
   error?: string;
 }
 
@@ -512,13 +618,11 @@ export async function requestProRataRefund(payload: {
     }
     return data as RefundApiResponse;
   } catch (err: any) {
-    console.warn('Refund API fallback notice:', err);
+    console.warn('Refund API notice:', err);
     return {
-      success: true,
-      mode: 'pending_gateway_secret',
-      refundId: `rfnd_req_${Date.now()}`,
-      status: 'pending_gateway_secret',
-      refundAmountINR: payload.refundAmountINR,
+      success: false,
+      mode: 'razorpay_error',
+      error: 'सर्व्हरशी संपर्क होऊ शकला नाही. कृपया पुन्हा प्रयत्न करा.',
     };
   }
 }
