@@ -34,6 +34,8 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
 
   // Selected billing cycle (Monthly, 3 Months, 6 Months, Yearly)
   const [billingCycle, setBillingCycle] = useState<BillingCycle>('monthly');
+  // Default to One-Time Payment so Razorpay AutoPay mandate/verification charges don't cut merchant balance
+  const [autoPayEnabled, setAutoPayEnabled] = useState<boolean>(false);
 
   // Loading state while launching official Razorpay popup
   const [loadingPlan, setLoadingPlan] = useState<PlanType | null>(null);
@@ -59,14 +61,16 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
       try {
         const savedPlan = sessionStorage.getItem('pixiforge_pending_plan') as PlanType | null;
         const savedCycle = (sessionStorage.getItem('pixiforge_pending_cycle') as BillingCycle | null) || 'monthly';
+        const savedAutoPay = sessionStorage.getItem('pixiforge_pending_autopay') === 'true';
         if (savedPlan && savedPlan !== 'free') {
           sessionStorage.removeItem('pixiforge_pending_plan');
           sessionStorage.removeItem('pixiforge_pending_cycle');
           sessionStorage.removeItem('pixiforge_pending_autopay');
           sessionStorage.removeItem('pixiforge_auth_redirect');
           setBillingCycle(savedCycle);
+          setAutoPayEnabled(savedAutoPay);
           setToastMessage(`Welcome ${user.name || ''}! Proceeding to ${savedPlan.toUpperCase()} checkout...`);
-          handleSelectPlan(savedPlan, savedCycle);
+          handleSelectPlan(savedPlan, savedCycle, savedAutoPay);
         }
       } catch (e) {
         // ignore
@@ -76,10 +80,12 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
 
   const handleSelectPlan = async (
     plan: PlanType,
-    cycleOverride?: BillingCycle
+    cycleOverride?: BillingCycle,
+    autoPayOverride?: boolean
   ) => {
     setErrorMessage(null);
     const chosenCycle = cycleOverride || billingCycle;
+    const useAutoPay = typeof autoPayOverride === 'boolean' ? autoPayOverride : autoPayEnabled;
 
     if (plan === 'free') {
       setPlan('free');
@@ -95,6 +101,7 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
       try {
         sessionStorage.setItem('pixiforge_pending_plan', plan);
         sessionStorage.setItem('pixiforge_pending_cycle', chosenCycle);
+        sessionStorage.setItem('pixiforge_pending_autopay', String(useAutoPay));
         sessionStorage.setItem('pixiforge_auth_redirect', '/pricing');
       } catch (e) {}
       setToastMessage('मेंबरशिप घेण्यासाठी कृपया लॉगिन करा.');
@@ -102,13 +109,13 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
       return;
     }
 
-    // Direct launch of Official Razorpay Checkout Modal (with AutoPay Subscription)
+    // Launch Official Razorpay Checkout (Standard One-Time Order by default, or AutoPay Subscription if opted in)
     setLoadingPlan(plan);
 
     await openDirectRazorpayCheckout({
       plan,
       billingCycle: chosenCycle,
-      autoPay: true,
+      autoPay: useAutoPay,
       user,
       onSuccess: (paymentId, paidPlan, amount, paidCycle, autoPayMeta) => {
         setLoadingPlan(null);
@@ -221,6 +228,39 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
               {activeCycleOption.label} plan selected — enjoy {activeCycleOption.discountPercent}% instant savings across all paid tiers
             </p>
           )}
+
+          {/* Payment Mode Selector: One-Time Order (Default) vs Opt-in AutoPay */}
+          <div className="pt-1 flex flex-col items-center gap-1.5">
+            <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100 border border-slate-200/90 text-[11px] font-bold">
+              <button
+                type="button"
+                onClick={() => setAutoPayEnabled(false)}
+                className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                  !autoPayEnabled
+                    ? 'bg-white text-blue-700 shadow-xs ring-1 ring-blue-200'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                One-Time Payment (Recommended)
+              </button>
+              <button
+                type="button"
+                onClick={() => setAutoPayEnabled(true)}
+                className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                  autoPayEnabled
+                    ? 'bg-white text-slate-900 shadow-xs ring-1 ring-slate-200'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                AutoPay (Auto-Renewal)
+              </button>
+            </div>
+            {autoPayEnabled && proPrice.totalINR < 5 && (
+              <p className="text-[11px] font-medium text-amber-700 max-w-md">
+                ₹5 पेक्षा कमी रकमेवर (उदा. ₹1) Razorpay AutoPay Mandate शुल्क मर्चंट खात्यातून कट होते, त्यामुळे सुरक्षिततेसाठी One-Time Order वापरला जाईल.
+              </p>
+            )}
+          </div>
         </div>
       </div>
 
