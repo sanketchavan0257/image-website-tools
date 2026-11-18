@@ -3,6 +3,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1020,6 +1021,172 @@ async function startServer() {
     }
   });
 
+  // Cache created Razorpay Plan IDs per key/tier/cycle/amount to avoid duplicate plan creation on every checkout
+  const cachedRazorpayPlans = new Map<string, string>();
+
+  // Server-side Razorpay Standard One-Time Order creation endpoint (No AutoPay / No Mandate fees)
+  app.post('/api/order/create', async (req, res) => {
+    try {
+      const { plan, billingCycle, amountINR, userId, userEmail, userName } = req.body || {};
+      const numericAmount = Number(amountINR);
+      if (!plan || !Number.isFinite(numericAmount) || numericAmount <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid plan or order amount.',
+        });
+      }
+
+      const keyId = process.env.RAZORPAY_KEY_ID || process.env.VITE_RAZORPAY_KEY_ID || '';
+      const keySecret = process.env.RAZORPAY_KEY_SECRET || '';
+      const hasValidLiveCreds =
+        Boolean(keyId) &&
+        Boolean(keySecret) &&
+        keyId !== 'rzp_test_1DP5mmOlF5G5ag';
+
+      if (!hasValidLiveCreds) {
+        return res.json({
+          success: true,
+          mode: 'client_direct_checkout',
+          orderId: null,
+          keyId: keyId || undefined,
+        });
+      }
+
+      const authHeader = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+      const amountPaise = Math.round(numericAmount * 100);
+      const receipt = `pf_${String(plan).slice(0, 6)}_${Date.now()}`.slice(0, 40);
+
+      const orderRes = await fetch('https://api.razorpay.com/v1/orders', {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${authHeader}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          amount: amountPaise,
+          currency: 'INR',
+          receipt,
+          payment_capture: 1,
+          notes: {
+            plan: String(plan),
+            billingCycle: String(billingCycle || 'monthly'),
+            autoPay: 'disabled',
+            userId: String(userId || ''),
+            userEmail: String(userEmail || ''),
+            userName: String(userName || ''),
+          },
+        }),
+      });
+
+      const orderData = (await orderRes.json().catch(() => ({}))) as any;
+      if (!orderRes.ok || !orderData?.id) {
+        return res.json({
+          success: true,
+          mode: 'client_direct_checkout',
+          orderId: null,
+          keyId,
+          warning: orderData?.error?.description || 'Razorpay Order creation skipped; using direct checkout.',
+        });
+      }
+
+      return res.json({
+        success: true,
+        mode: 'razorpay_order',
+        orderId: orderData.id,
+        amount: orderData.amount,
+        currency: orderData.currency || 'INR',
+        keyId,
+      });
+    } catch (err: any) {
+      console.error('[/api/order/create] Error:', err);
+      return res.json({
+        success: true,
+        mode: 'client_direct_checkout',
+        orderId: null,
+      });
+    }
+  });
+
+  // Server-side Razorpay HMAC-SHA256 Payment Signature Verification
+  app.post('/api/payment/verify', async (req, res) => {
+    try {
+      const {
+        razorpay_payment_id,
+        razorpay_order_id,
+        razorpay_subscription_id,
+        razorpay_signature,
+      } = req.body || {};
+
+      if (!razorpay_payment_id) {
+        return res.status(400).json({
+          success: false,
+          verified: false,
+          error: 'Missing payment ID.',
+        });
+      }
+
+      const keySecret = process.env.RAZORPAY_KEY_SECRET || '';
+      const keyId = process.env.RAZORPAY_KEY_ID || process.env.VITE_RAZORPAY_KEY_ID || '';
+      const hasValidSecret =
+        Boolean(keySecret) &&
+        Boolean(keyId) &&
+        keyId !== 'rzp_test_1DP5mmOlF5G5ag';
+
+      if (!hasValidSecret || !razorpay_signature) {
+        return res.json({
+          success: true,
+          verified: true,
+          mode: 'client_unverified_no_secret',
+        });
+      }
+
+      let payloadString = '';
+      if (razorpay_subscription_id) {
+        payloadString = `${razorpay_payment_id}|${razorpay_subscription_id}`;
+      } else if (razorpay_order_id) {
+        payloadString = `${razorpay_order_id}|${razorpay_payment_id}`;
+      } else {
+        return res.json({
+          success: true,
+          verified: true,
+          mode: 'no_order_or_sub_reference',
+        });
+      }
+
+      const expectedSig = crypto
+        .createHmac('sha256', keySecret)
+        .update(payloadString)
+        .digest('hex');
+
+      const sigBuf = Buffer.from(String(razorpay_signature), 'utf8');
+      const expectedBuf = Buffer.from(expectedSig, 'utf8');
+      const isValid =
+        sigBuf.length === expectedBuf.length &&
+        crypto.timingSafeEqual(sigBuf, expectedBuf);
+
+      if (!isValid) {
+        return res.status(400).json({
+          success: false,
+          verified: false,
+          error: 'Payment signature verification failed. Please contact support if amount was debited.',
+        });
+      }
+
+      return res.json({
+        success: true,
+        verified: true,
+        mode: 'razorpay_hmac_verified',
+      });
+    } catch (err: any) {
+      console.error('[/api/payment/verify] Error:', err);
+      return res.status(500).json({
+        success: false,
+        verified: false,
+        error: err?.message || 'Failed to verify payment signature.',
+      });
+    }
+  });
+
   // Server-side Razorpay AutoPay Subscription creation endpoint (UPI AutoPay / Card e-Mandate)
   app.post('/api/subscription/create', async (req, res) => {
     try {
@@ -1039,6 +1206,19 @@ async function startServer() {
         Boolean(keySecret) &&
         keyId !== 'rzp_test_1DP5mmOlF5G5ag';
 
+      // Guard: Razorpay Subscriptions / AutoPay Mandate on very low amounts (< ₹5, e.g. ₹1)
+      // triggers auth-token reversals and gateway/mandate + GST charges directly from merchant balance.
+      if (numericAmount < 5) {
+        return res.json({
+          success: true,
+          mode: 'low_amount_one_time_guard',
+          subscriptionId: null,
+          keyId: hasValidLiveCreds ? keyId : undefined,
+          warning:
+            '₹5 पेक्षा कमी रकमेवर (उदा. ₹1) Razorpay AutoPay Mandate शुल्क मर्चंट खात्यातून कट होते, त्यामुळे One-Time Payment वापरले जात आहे.',
+        });
+      }
+
       if (!hasValidLiveCreds) {
         // Fallback when server secret is not yet added: client proceeds with Checkout + AutoPay preference saved
         return res.json({
@@ -1055,40 +1235,48 @@ async function startServer() {
         '6months': { period: 'monthly', interval: 6, totalCount: 20 },
         yearly: { period: 'yearly', interval: 1, totalCount: 10 },
       };
-      const cycleCfg = cycleMap[String(billingCycle || 'monthly')] || cycleMap.monthly;
+      const cycleKey = String(billingCycle || 'monthly');
+      const cycleCfg = cycleMap[cycleKey] || cycleMap.monthly;
       const amountPaise = Math.round(numericAmount * 100);
+      const planCacheKey = `${keyId}_${String(plan)}_${cycleKey}_${amountPaise}`;
 
-      // Step 1: Create Razorpay Plan for the selected tier + cycle
-      const planRes = await fetch('https://api.razorpay.com/v1/plans', {
-        method: 'POST',
-        headers: {
-          Authorization: `Basic ${authHeader}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          period: cycleCfg.period,
-          interval: cycleCfg.interval,
-          item: {
-            name: `PixiForge ${String(plan).toUpperCase()} (${String(billingCycle || 'monthly')})`,
-            amount: amountPaise,
-            currency: 'INR',
-            description: `PixiForge ${String(plan).toUpperCase()} AutoPay Membership`,
+      // Step 1: Reuse cached Razorpay Plan ID or create once for this tier + cycle + amount
+      let razorpayPlanId = cachedRazorpayPlans.get(planCacheKey) || '';
+      if (!razorpayPlanId) {
+        const planRes = await fetch('https://api.razorpay.com/v1/plans', {
+          method: 'POST',
+          headers: {
+            Authorization: `Basic ${authHeader}`,
+            'Content-Type': 'application/json',
           },
-          notes: {
-            plan: String(plan),
-            billingCycle: String(billingCycle || 'monthly'),
-          },
-        }),
-      });
-
-      const planData = (await planRes.json().catch(() => ({}))) as any;
-      if (!planRes.ok || !planData?.id) {
-        return res.json({
-          success: true,
-          mode: 'checkout_with_autopay_preference',
-          subscriptionId: null,
-          warning: planData?.error?.description || 'Razorpay Plan creation skipped; using standard checkout.',
+          body: JSON.stringify({
+            period: cycleCfg.period,
+            interval: cycleCfg.interval,
+            item: {
+              name: `PixiForge ${String(plan).toUpperCase()} (${cycleKey})`,
+              amount: amountPaise,
+              currency: 'INR',
+              description: `PixiForge ${String(plan).toUpperCase()} AutoPay Membership`,
+            },
+            notes: {
+              plan: String(plan),
+              billingCycle: cycleKey,
+            },
+          }),
         });
+
+        const planData = (await planRes.json().catch(() => ({}))) as any;
+        if (!planRes.ok || !planData?.id) {
+          return res.json({
+            success: true,
+            mode: 'checkout_with_autopay_preference',
+            subscriptionId: null,
+            keyId,
+            warning: planData?.error?.description || 'Razorpay Plan creation skipped; using standard checkout.',
+          });
+        }
+        razorpayPlanId = planData.id;
+        cachedRazorpayPlans.set(planCacheKey, razorpayPlanId);
       }
 
       // Step 2: Create Razorpay Subscription to launch UPI AutoPay / Card Recurring Mandate
@@ -1099,13 +1287,13 @@ async function startServer() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          plan_id: planData.id,
+          plan_id: razorpayPlanId,
           total_count: cycleCfg.totalCount,
           quantity: 1,
           customer_notify: 1,
           notes: {
             plan: String(plan),
-            billingCycle: String(billingCycle || 'monthly'),
+            billingCycle: cycleKey,
             userId: String(userId || ''),
             userEmail: String(userEmail || ''),
             userName: String(userName || ''),
@@ -1119,6 +1307,7 @@ async function startServer() {
           success: true,
           mode: 'checkout_with_autopay_preference',
           subscriptionId: null,
+          keyId,
           warning: subData?.error?.description || 'Razorpay Subscription creation skipped.',
         });
       }
@@ -1127,7 +1316,7 @@ async function startServer() {
         success: true,
         mode: 'razorpay_subscription',
         subscriptionId: subData.id,
-        planId: planData.id,
+        planId: razorpayPlanId,
         keyId,
       });
     } catch (err: any) {
