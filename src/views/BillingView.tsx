@@ -55,6 +55,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
     daysUsed: number;
     totalDays: number;
     mode?: string;
+    status?: string;
   } | null>(null);
 
   const currentPlan = user?.plan || activePlan || 'free';
@@ -128,6 +129,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
       let finalRefundAmount = hasRealPayment ? refundBreakdown.refundAmountINR : 0;
       let finalRefundId = `rfnd_nopay_${Date.now()}`;
       let finalMode: string | undefined = 'no_refund_needed';
+      let finalStatus: string | undefined = 'processed';
 
       if (hasRealPayment && refundBreakdown.refundAmountINR > 0) {
         const apiRes = await requestProRataRefund({
@@ -148,6 +150,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
 
         finalRefundId = apiRes.refundId || `rfnd_${Date.now()}`;
         finalMode = apiRes.mode;
+        finalStatus = apiRes.status;
         if (typeof apiRes.refundAmountINR === 'number') {
           finalRefundAmount = apiRes.refundAmountINR;
         }
@@ -170,6 +173,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
         daysUsed: refundBreakdown.daysUsed,
         totalDays: refundBreakdown.totalDays,
         mode: finalMode,
+        status: finalStatus,
       });
     } finally {
       setIsProcessingCancel(false);
@@ -208,8 +212,17 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
   const handleEnableAutoPay = async () => {
     if (!user || currentPlan === 'free') return;
     setAutoPayNotice(null);
-    setIsTogglingAutoPay(true);
     const chosenCycle = user.billingCycle || 'monthly';
+    const priceInfo = getPlanCyclePrice(currentPlan as 'pro' | 'max' | 'ultra', chosenCycle);
+    if (priceInfo.totalINR < 5) {
+      setAutoPayNotice({
+        type: 'error',
+        message:
+          '₹5 पेक्षा कमी रकमेवर (उदा. ₹1) Razorpay AutoPay Mandate शुल्क मर्चंट खात्यातून कट होते. AutoPay सुरू करण्यासाठी प्लॅनची किंमत किमान ₹5 किंवा जास्त असणे आवश्यक आहे.',
+      });
+      return;
+    }
+    setIsTogglingAutoPay(true);
     await openDirectRazorpayCheckout({
       plan: currentPlan as 'pro' | 'max' | 'ultra',
       billingCycle: chosenCycle,
@@ -419,33 +432,66 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
         </button>
       </div>
 
-      {/* Refund Initiated Confirmation Banner */}
+      {/* Refund Initiated / Pending Secret Confirmation Banner */}
       {cancelSuccessBanner && (
-        <div className="p-5 rounded-3xl bg-emerald-50 border border-emerald-200 text-emerald-900 flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in">
+        <div
+          className={`p-5 rounded-3xl border flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in ${
+            cancelSuccessBanner.mode === 'razorpay_api'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+              : cancelSuccessBanner.mode === 'pending_gateway_secret'
+              ? 'bg-amber-50 border-amber-200 text-amber-950'
+              : 'bg-slate-50 border-slate-200 text-slate-900'
+          }`}
+        >
           <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+            <div
+              className={`w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 ${
+                cancelSuccessBanner.mode === 'razorpay_api'
+                  ? 'bg-emerald-100 text-emerald-700'
+                  : cancelSuccessBanner.mode === 'pending_gateway_secret'
+                  ? 'bg-amber-100 text-amber-700'
+                  : 'bg-slate-200 text-slate-700'
+              }`}
+            >
               <RotateCcw className="w-5 h-5" />
             </div>
             <div className="space-y-1 text-xs">
-              <h3 className="text-sm font-black text-emerald-950">
-                Membership Cancelled & ₹{cancelSuccessBanner.refundAmount.toLocaleString('en-IN')} Refund Initiated!
-              </h3>
-              <p className="text-emerald-800 leading-relaxed">
-                तुमची वापरलेली <strong>{cancelSuccessBanner.daysUsed} दिवसांची</strong> रक्कम वजा करून उरलेले{' '}
-                <strong>₹{cancelSuccessBanner.refundAmount.toLocaleString('en-IN')}</strong> तुमच्या मूळ पेमेंट अकाउंटवर (UPI / बँक / कार्ड){' '}
+              <h3 className="text-sm font-black">
                 {cancelSuccessBanner.mode === 'razorpay_api'
-                  ? 'Razorpay द्वारे पाठवले आहेत (५-७ कामाच्या दिवसांत जमा होतील).'
-                  : 'रिफंड प्रक्रियेत नोंदवले आहेत.'}
+                  ? `Membership Cancelled & ₹${cancelSuccessBanner.refundAmount.toLocaleString('en-IN')} Refund Initiated!`
+                  : cancelSuccessBanner.mode === 'pending_gateway_secret'
+                  ? 'Membership Cancelled — पण Razorpay वर रिफंड पाठवता आला नाही'
+                  : 'Membership Cancelled (Switched to Free)'}
+              </h3>
+              <p className="leading-relaxed opacity-90">
+                {cancelSuccessBanner.mode === 'razorpay_api' ? (
+                  <>
+                    तुमची वापरलेली <strong>{cancelSuccessBanner.daysUsed} दिवसांची</strong> रक्कम वजा करून उरलेले{' '}
+                    <strong>₹{cancelSuccessBanner.refundAmount.toLocaleString('en-IN')}</strong> तुमच्या मूळ पेमेंट अकाउंटवर (UPI / बँक / कार्ड) Razorpay द्वारे पाठवले आहेत (५-७ कामाच्या दिवसांत जमा होतील).
+                  </>
+                ) : cancelSuccessBanner.mode === 'pending_gateway_secret' ? (
+                  cancelSuccessBanner.status === 'no_gateway_payment_found' ? (
+                    <>
+                      हा Payment ID तुमच्या सध्याच्या सर्व्हरवरील Razorpay Key मध्ये सापडला नाही (किंवा पेमेंट वेगळ्या / Test Key मधून झाले होते). कृपया Razorpay Dashboard मधून पेमेंट तपासा किंवा मॅन्युअल रिफंड करा.
+                    </>
+                  ) : (
+                    <>
+                      सर्व्हरवर <strong>RAZORPAY_KEY_ID</strong> आणि <strong>RAZORPAY_KEY_SECRET</strong> सेट नसल्यामुळे Razorpay कडे ऑटोमॅटिक रिफंड API विनंती गेली नाही. ऑटोमॅटिक रिफंडसाठी Secrets मध्ये दोन्ही की जोडा, किंवा Razorpay Dashboard मधून मॅन्युअल रिफंड करा.
+                    </>
+                  )
+                ) : (
+                  <>तुमची मेंबरशिप रद्द करून अकाउंट Free प्लॅनवर केले आहे.</>
+                )}
               </p>
-              <p className="font-mono text-[11px] text-emerald-700">
-                Refund Reference ID: <strong>{cancelSuccessBanner.refundId}</strong>
+              <p className="font-mono text-[11px] opacity-80">
+                Reference ID: <strong>{cancelSuccessBanner.refundId}</strong>
               </p>
             </div>
           </div>
           <button
             type="button"
             onClick={() => setCancelSuccessBanner(null)}
-            className="text-xs font-bold text-emerald-700 hover:text-emerald-950 underline self-end sm:self-center cursor-pointer"
+            className="text-xs font-bold underline self-end sm:self-center cursor-pointer"
           >
             Dismiss
           </button>
