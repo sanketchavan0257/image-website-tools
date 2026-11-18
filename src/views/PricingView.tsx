@@ -34,8 +34,8 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
 
   // Selected billing cycle (Monthly, 3 Months, 6 Months, Yearly)
   const [billingCycle, setBillingCycle] = useState<BillingCycle>('monthly');
-  // Default to One-Time Payment so Razorpay AutoPay mandate/verification charges don't cut merchant balance
-  const [autoPayEnabled, setAutoPayEnabled] = useState<boolean>(false);
+  // AutoPay (Auto-Renewal) enabled by default on ₹9+ plans (charges first cycle now + sets up AutoPay for next cycle)
+  const [autoPayEnabled, setAutoPayEnabled] = useState<boolean>(true);
 
   // Loading state while launching official Razorpay popup
   const [loadingPlan, setLoadingPlan] = useState<PlanType | null>(null);
@@ -61,7 +61,8 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
       try {
         const savedPlan = sessionStorage.getItem('pixiforge_pending_plan') as PlanType | null;
         const savedCycle = (sessionStorage.getItem('pixiforge_pending_cycle') as BillingCycle | null) || 'monthly';
-        const savedAutoPay = sessionStorage.getItem('pixiforge_pending_autopay') === 'true';
+        const savedAutoPayRaw = sessionStorage.getItem('pixiforge_pending_autopay');
+        const savedAutoPay = savedAutoPayRaw === null ? true : savedAutoPayRaw === 'true';
         if (savedPlan && savedPlan !== 'free') {
           sessionStorage.removeItem('pixiforge_pending_plan');
           sessionStorage.removeItem('pixiforge_pending_cycle');
@@ -229,30 +230,30 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
             </p>
           )}
 
-          {/* Payment Mode Selector: One-Time Order (Default) vs Opt-in AutoPay */}
+          {/* Payment Mode Selector: AutoPay (Default) vs One-Time Payment */}
           <div className="pt-1 flex flex-col items-center gap-1.5">
             <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100 border border-slate-200/90 text-[11px] font-bold">
-              <button
-                type="button"
-                onClick={() => setAutoPayEnabled(false)}
-                className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                  !autoPayEnabled
-                    ? 'bg-white text-blue-700 shadow-xs ring-1 ring-blue-200'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                One-Time Payment (Recommended)
-              </button>
               <button
                 type="button"
                 onClick={() => setAutoPayEnabled(true)}
                 className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
                   autoPayEnabled
-                    ? 'bg-white text-slate-900 shadow-xs ring-1 ring-slate-200'
+                    ? 'bg-white text-blue-700 shadow-xs ring-1 ring-blue-200'
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
                 AutoPay (Auto-Renewal)
+              </button>
+              <button
+                type="button"
+                onClick={() => setAutoPayEnabled(false)}
+                className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                  !autoPayEnabled
+                    ? 'bg-white text-slate-900 shadow-xs ring-1 ring-slate-200'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                One-Time Payment
               </button>
             </div>
             {autoPayEnabled && proPrice.totalINR < 5 && (
