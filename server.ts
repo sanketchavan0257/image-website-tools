@@ -3,6 +3,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import zlib from 'zlib';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
@@ -1468,6 +1469,205 @@ async function startServer() {
     }
   });
 
+  // Fast Native C++ Background Removal (BRIA RMBG-1.4, pre-warmed once in server memory)
+  let serverRmbgSessionPromise: Promise<any> | null = null;
+  let serverRmbgReady = false;
+  let serverRmbgQueue: Promise<unknown> = Promise.resolve();
+
+  const resolveRmbgModelPath = (): string | null => {
+    const candidates = [
+      path.resolve(__dirname, 'public/mediapipe-models/rmbg-1.4.onnx'),
+      path.resolve(__dirname, 'dist/mediapipe-models/rmbg-1.4.onnx'),
+    ];
+    for (const p of candidates) {
+      if (fs.existsSync(p)) return p;
+    }
+    return null;
+  };
+
+  const getServerRmbgSession = async () => {
+    if (!serverRmbgSessionPromise) {
+      serverRmbgSessionPromise = (async () => {
+        const modelPath = resolveRmbgModelPath();
+        if (!modelPath) {
+          throw new Error('RMBG-1.4 ONNX model file not found on server.');
+        }
+        const ortMod = await import('onnxruntime-node');
+        const ortNode = ortMod.default || ortMod;
+        const sess = await ortNode.InferenceSession.create(modelPath, {
+          executionProviders: ['cpu'],
+          graphOptimizationLevel: 'all',
+        });
+        serverRmbgReady = true;
+        return { ortNode, sess };
+      })().catch((err) => {
+        serverRmbgSessionPromise = null;
+        serverRmbgReady = false;
+        throw err;
+      });
+    }
+    return serverRmbgSessionPromise;
+  };
+
+  app.get('/api/remove-background/warm', (_req, res) => {
+    void getServerRmbgSession().catch((err) => {
+      console.warn('[/api/remove-background/warm] Prewarm failed:', err);
+    });
+    res.json({ ok: true, ready: serverRmbgReady });
+  });
+
+  app.post(
+    '/api/remove-background',
+    express.raw({
+      type: ['application/octet-stream', 'application/x-gzip'],
+      limit: '10mb',
+    }),
+    async (req, res) => {
+      try {
+        const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+        if (!rawBody.length) {
+          return res.status(400).json({ error: 'Empty payload' });
+        }
+
+        const isGzip =
+          req.headers['x-payload-encoding'] === 'gzip' ||
+          req.headers['content-type'] === 'application/x-gzip';
+        let rgbBuf: Buffer;
+        if (isGzip) {
+          try {
+            rgbBuf = zlib.gunzipSync(rawBody);
+          } catch {
+            return res.status(400).json({ error: 'Invalid compressed payload' });
+          }
+        } else {
+          rgbBuf = rawBody;
+        }
+
+        const SIZE = 1024;
+        const TOTAL = SIZE * SIZE;
+        const EXPECTED_BYTES = TOTAL * 3;
+        if (rgbBuf.byteLength !== EXPECTED_BYTES) {
+          return res.status(400).json({
+            error: `Expected ${EXPECTED_BYTES} RGB bytes, got ${rgbBuf.byteLength}`,
+          });
+        }
+
+        const tensorData = new Float32Array(3 * TOTAL);
+        const inv255 = 1 / 255;
+        for (let i = 0; i < TOTAL; i++) {
+          const p = i * 3;
+          tensorData[i] = rgbBuf[p] * inv255 - 0.5;
+          tensorData[TOTAL + i] = rgbBuf[p + 1] * inv255 - 0.5;
+          tensorData[2 * TOTAL + i] = rgbBuf[p + 2] * inv255 - 0.5;
+        }
+
+        const nextMaskPromise: Promise<Buffer> = serverRmbgQueue
+          .catch(() => {})
+          .then(async (): Promise<Buffer> => {
+            const { ortNode, sess } = await getServerRmbgSession();
+            const inputName = sess.inputNames[0] || 'input';
+            const inputTensor = new ortNode.Tensor('float32', tensorData, [1, 3, SIZE, SIZE]);
+            const outputs = await sess.run({ [inputName]: inputTensor });
+            const rawOut = outputs[sess.outputNames[0]].data as Float32Array;
+
+            let minVal = Infinity;
+            let maxVal = -Infinity;
+            for (let i = 0; i < TOTAL; i++) {
+              const v = rawOut[i];
+              if (v < minVal) minVal = v;
+              if (v > maxVal) maxVal = v;
+            }
+            const span = maxVal - minVal;
+            const outMask = Buffer.allocUnsafe(TOTAL);
+            if (span > 1e-5) {
+              for (let i = 0; i < TOTAL; i++) {
+                const norm = Math.min(1, Math.max(0, (rawOut[i] - minVal) / span));
+                outMask[i] = Math.round(norm * 255);
+              }
+            } else {
+              for (let i = 0; i < TOTAL; i++) {
+                const norm = Math.min(1, Math.max(0, rawOut[i]));
+                outMask[i] = Math.round(norm * 255);
+              }
+            }
+            return outMask;
+          });
+        serverRmbgQueue = nextMaskPromise;
+        const maskBuffer = await nextMaskPromise;
+
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Cache-Control', 'no-store');
+        if (String(req.headers['accept-encoding'] || '').includes('gzip')) {
+          const gz = zlib.gzipSync(maskBuffer);
+          res.setHeader('Content-Encoding', 'gzip');
+          return res.send(gz);
+        }
+        return res.send(maskBuffer);
+      } catch (err: any) {
+        console.error('[/api/remove-background] Inference failed:', err);
+        return res.status(500).json({ error: err?.message || 'Background removal failed' });
+      }
+    }
+  );
+
+  const mediapipeWasmDir = fs.existsSync(path.resolve(__dirname, 'public/mediapipe-wasm'))
+    ? path.resolve(__dirname, 'public/mediapipe-wasm')
+    : path.resolve(__dirname, 'dist/mediapipe-wasm');
+  if (fs.existsSync(mediapipeWasmDir)) {
+    app.use(
+      '/mediapipe-wasm',
+      express.static(mediapipeWasmDir, {
+        fallthrough: false,
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.wasm')) {
+            res.setHeader('Content-Type', 'application/wasm');
+          } else if (filePath.endsWith('.js') || filePath.endsWith('.mjs')) {
+            res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+          }
+          res.setHeader('Cache-Control', 'public, max-age=86400');
+        },
+      })
+    );
+  }
+
+  const mediapipeModelsDir = fs.existsSync(path.resolve(__dirname, 'public/mediapipe-models'))
+    ? path.resolve(__dirname, 'public/mediapipe-models')
+    : path.resolve(__dirname, 'dist/mediapipe-models');
+  if (fs.existsSync(mediapipeModelsDir)) {
+    app.use(
+      '/mediapipe-models',
+      express.static(mediapipeModelsDir, {
+        fallthrough: false,
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.tflite') || filePath.endsWith('.onnx')) {
+            res.setHeader('Content-Type', 'application/octet-stream');
+          }
+          res.setHeader('Cache-Control', 'public, max-age=86400');
+        },
+      })
+    );
+  }
+
+  const ortWasmDir = fs.existsSync(path.resolve(__dirname, 'public/ort-wasm'))
+    ? path.resolve(__dirname, 'public/ort-wasm')
+    : path.resolve(__dirname, 'dist/ort-wasm');
+  if (fs.existsSync(ortWasmDir)) {
+    app.use(
+      '/ort-wasm',
+      express.static(ortWasmDir, {
+        fallthrough: false,
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.wasm')) {
+            res.setHeader('Content-Type', 'application/wasm');
+          } else if (filePath.endsWith('.js') || filePath.endsWith('.mjs')) {
+            res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+          }
+          res.setHeader('Cache-Control', 'public, max-age=86400');
+        },
+      })
+    );
+  }
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -1485,6 +1685,10 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`PixiForge server listening on http://0.0.0.0:${PORT}`);
+    // Pre-warm native RMBG-1.4 AI session in background so first cutout is instant
+    setTimeout(() => {
+      void getServerRmbgSession().catch(() => {});
+    }, 300);
   });
 }
 
