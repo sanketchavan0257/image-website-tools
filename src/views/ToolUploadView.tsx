@@ -3,6 +3,7 @@ import { ToolDefinition } from '../types';
 import { UploadBox } from '../components/upload/UploadBox';
 import { Base64ToImageConverter } from '../components/tools/Base64ToImageConverter';
 import { AdSlot } from '../components/common/AdSlot';
+import { prewarmBgRemovalAI } from '../services/bgRemovalEngine';
 import {
   Sparkles,
   ShieldCheck,
@@ -30,6 +31,9 @@ export const ToolUploadView: React.FC<ToolUploadViewProps> = ({
     const metaDesc = document.querySelector('meta[name="description"]');
     if (metaDesc) {
       metaDesc.setAttribute('content', tool.metaDescription);
+    }
+    if (tool.id === 'bg-remover') {
+      prewarmBgRemovalAI();
     }
   }, [tool]);
 
