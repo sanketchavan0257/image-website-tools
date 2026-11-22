@@ -1216,7 +1216,7 @@ async function startServer() {
           subscriptionId: null,
           keyId: hasValidLiveCreds ? keyId : undefined,
           warning:
-            '₹5 पेक्षा कमी रकमेवर (उदा. ₹1) Razorpay AutoPay Mandate शुल्क मर्चंट खात्यातून कट होते, त्यामुळे One-Time Payment वापरले जात आहे.',
+            'For amounts below ₹5 (e.g. ₹1), Razorpay AutoPay mandate fees are deducted from the merchant account, so a one-time payment is being used instead.',
         });
       }
 
