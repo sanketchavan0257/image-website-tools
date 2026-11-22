@@ -38,7 +38,7 @@ export const RazorpayKeyConfigModal: React.FC<RazorpayKeyConfigModalProps> = ({
     const cleanKey = keyInput.trim();
 
     if (cleanKey && !cleanKey.startsWith('rzp_')) {
-      setError('Razorpay Key ID "rzp_test_" किंवा "rzp_live_" ने सुरू असावी (उदा. rzp_live_xxxxxxxx).');
+      setError('Razorpay Key ID must start with "rzp_test_" or "rzp_live_" (e.g. rzp_live_xxxxxxxx).');
       return;
     }
 
@@ -81,7 +81,7 @@ export const RazorpayKeyConfigModal: React.FC<RazorpayKeyConfigModalProps> = ({
               Razorpay Merchant Key
             </h3>
             <p className="text-xs text-slate-500">
-              तुमच्या खात्यात थेट पेमेंट येण्यासाठी तुमची Key ID टाका
+              Enter your Key ID to receive payments directly in your account
             </p>
           </div>
         </div>
@@ -95,23 +95,23 @@ export const RazorpayKeyConfigModal: React.FC<RazorpayKeyConfigModalProps> = ({
               type="text"
               value={keyInput}
               onChange={(e) => setKeyInput(e.target.value)}
-              placeholder="rzp_live_xxxxxxxxxxxxxx किंवा rzp_test_..."
+              placeholder="rzp_live_xxxxxxxxxxxxxx or rzp_test_..."
               className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm bg-white font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             <span className="text-[11px] text-slate-400 mt-1 block">
-              Razorpay Dashboard &gt; Settings &gt; API Keys मधून Key ID मिळवा.
+              Razorpay Dashboard &gt; Settings &gt; API Keys — get your Key ID from there.
             </span>
           </div>
 
           <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-xs text-slate-600 space-y-1">
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">सध्या कार्यरत Key:</span>
+              <span className="text-slate-500">Active key:</span>
               <span className="font-mono font-bold text-slate-800 text-[11px]">
                 {activeKey.slice(0, 10)}•••••
               </span>
             </div>
             <div className="text-[10px] text-slate-400">
-              * जर तुम्ही तुमची Key टाकली तर सर्व पैसे थेट तुमच्या Razorpay डॅशबोर्डवर जमा होतील.
+              * If you enter your own key, all payments will be credited directly to your Razorpay dashboard.
             </div>
           </div>
 
@@ -125,7 +125,7 @@ export const RazorpayKeyConfigModal: React.FC<RazorpayKeyConfigModalProps> = ({
           {savedSuccess && (
             <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-2">
               <Check className="w-4 h-4 shrink-0 text-emerald-600" />
-              <span>Key यशस्वीरीत्या सेव्ह झाली! आता थेट तुमच्या खात्यावर पेमेंट्स येतील.</span>
+              <span>Key saved successfully! Payments will now go directly to your account.</span>
             </div>
           )}
 
