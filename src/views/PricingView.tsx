@@ -105,7 +105,7 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
         sessionStorage.setItem('pixiforge_pending_autopay', String(useAutoPay));
         sessionStorage.setItem('pixiforge_auth_redirect', '/pricing');
       } catch (e) {}
-      setToastMessage('मेंबरशिप घेण्यासाठी कृपया लॉगिन करा.');
+      setToastMessage('Please log in to get a membership.');
       onNavigate('/login?redirect=/pricing');
       return;
     }
@@ -139,7 +139,7 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
       },
       onFailure: (err) => {
         setLoadingPlan(null);
-        setErrorMessage(err || 'पेमेंट प्रक्रिया पूर्ण होऊ शकली नाही.');
+        setErrorMessage(err || 'The payment could not be completed.');
       },
       onDismiss: () => {
         setLoadingPlan(null);
@@ -180,7 +180,7 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
           <div className="pt-2 flex justify-center">
             <div className="inline-flex flex-wrap items-center justify-center gap-2 px-4 py-2 rounded-2xl bg-amber-50 border border-amber-200/90 text-amber-900 text-xs font-medium shadow-2xs">
               <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-              <span>मेंबरशिप खरेदी करण्यासाठी लॉगिन असणे आवश्यक आहे.</span>
+              <span>You need to be logged in to buy a membership.</span>
               <button
                 type="button"
                 onClick={() => {
@@ -191,7 +191,7 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
                 }}
                 className="text-blue-700 hover:text-blue-900 font-bold underline cursor-pointer ml-1"
               >
-                येथे लॉगिन करा
+                Log in here
               </button>
             </div>
           </div>
@@ -258,7 +258,7 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
             </div>
             {autoPayEnabled && proPrice.totalINR < 5 && (
               <p className="text-[11px] font-medium text-amber-700 max-w-md">
-                ₹5 पेक्षा कमी रकमेवर (उदा. ₹1) Razorpay AutoPay Mandate शुल्क मर्चंट खात्यातून कट होते, त्यामुळे सुरक्षिततेसाठी One-Time Order वापरला जाईल.
+                For amounts below ₹5 (e.g. ₹1), Razorpay AutoPay mandate fees are deducted from the merchant account, so a one-time order will be used for safety.
               </p>
             )}
           </div>
