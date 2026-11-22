@@ -144,7 +144,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
         });
 
         if (!apiRes.success) {
-          setCancelError(apiRes.error || 'रद्द करताना आणि रिफंड प्रोसेस करताना अडचण आली. कृपया पुन्हा प्रयत्न करा.');
+          setCancelError(apiRes.error || 'There was a problem cancelling and processing the refund. Please try again.');
           return;
         }
 
@@ -192,7 +192,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
       if (!cancelRes.success) {
         setAutoPayNotice({
           type: 'error',
-          message: cancelRes.error || 'AutoPay बंद करताना अडचण आली. कृपया पुन्हा प्रयत्न करा.',
+          message: cancelRes.error || 'There was a problem turning off AutoPay. Please try again.',
         });
         return;
       }
@@ -202,7 +202,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
       });
       setAutoPayNotice({
         type: 'success',
-        message: 'AutoPay बंद केले आहे. तुमचा सध्याचा प्लॅन वैध तारखेपर्यंत चालू राहील आणि पुढच्या वेळी ऑटोमॅटिक पैसे कट होणार नाहीत.',
+        message: 'AutoPay has been turned off. Your current plan stays active until its valid end date and you will not be charged automatically next time.',
       });
     } finally {
       setIsTogglingAutoPay(false);
@@ -218,7 +218,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
       setAutoPayNotice({
         type: 'error',
         message:
-          '₹5 पेक्षा कमी रकमेवर (उदा. ₹1) Razorpay AutoPay Mandate शुल्क मर्चंट खात्यातून कट होते. AutoPay सुरू करण्यासाठी प्लॅनची किंमत किमान ₹5 किंवा जास्त असणे आवश्यक आहे.',
+          'For amounts below ₹5 (e.g. ₹1), Razorpay AutoPay mandate fees are deducted from the merchant account. The plan price must be at least ₹5 to enable AutoPay.',
       });
       return;
     }
@@ -241,14 +241,14 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
         });
         setAutoPayNotice({
           type: 'success',
-          message: 'AutoPay (UPI AutoPay / Card) यशस्वीरित्या सुरू झाले आहे! पुढील बिलिंग तारखेला मेंबरशिप आपोआप रिन्यू होईल.',
+          message: 'AutoPay (UPI AutoPay / Card) has been enabled successfully! Your membership will renew automatically on the next billing date.',
         });
       },
       onFailure: (err) => {
         setIsTogglingAutoPay(false);
         setAutoPayNotice({
           type: 'error',
-          message: err || 'AutoPay सुरू करताना पेमेंट प्रक्रिया पूर्ण होऊ शकली नाही.',
+          message: err || 'The payment could not be completed while enabling AutoPay.',
         });
       },
       onDismiss: () => {
@@ -460,27 +460,27 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
                 {cancelSuccessBanner.mode === 'razorpay_api'
                   ? `Membership Cancelled & ₹${cancelSuccessBanner.refundAmount.toLocaleString('en-IN')} Refund Initiated!`
                   : cancelSuccessBanner.mode === 'pending_gateway_secret'
-                  ? 'Membership Cancelled — पण Razorpay वर रिफंड पाठवता आला नाही'
+                  ? 'Membership Cancelled — but the refund could not be sent via Razorpay'
                   : 'Membership Cancelled (Switched to Free)'}
               </h3>
               <p className="leading-relaxed opacity-90">
                 {cancelSuccessBanner.mode === 'razorpay_api' ? (
                   <>
-                    तुमची वापरलेली <strong>{cancelSuccessBanner.daysUsed} दिवसांची</strong> रक्कम वजा करून उरलेले{' '}
-                    <strong>₹{cancelSuccessBanner.refundAmount.toLocaleString('en-IN')}</strong> तुमच्या मूळ पेमेंट अकाउंटवर (UPI / बँक / कार्ड) Razorpay द्वारे पाठवले आहेत (५-७ कामाच्या दिवसांत जमा होतील).
+                    The amount for your <strong>{cancelSuccessBanner.daysUsed} days</strong> of usage has been deducted, and the remaining{' '}
+                    <strong>₹{cancelSuccessBanner.refundAmount.toLocaleString('en-IN')}</strong> has been sent to your original payment account (UPI / bank / card) via Razorpay (credited instantly where supported, otherwise within 5–7 working days).
                   </>
                 ) : cancelSuccessBanner.mode === 'pending_gateway_secret' ? (
                   cancelSuccessBanner.status === 'no_gateway_payment_found' ? (
                     <>
-                      हा Payment ID तुमच्या सध्याच्या सर्व्हरवरील Razorpay Key मध्ये सापडला नाही (किंवा पेमेंट वेगळ्या / Test Key मधून झाले होते). कृपया Razorpay Dashboard मधून पेमेंट तपासा किंवा मॅन्युअल रिफंड करा.
+                      This Payment ID was not found under the Razorpay key on your current server (or the payment was made with a different / Test key). Please check the payment in the Razorpay Dashboard or issue a manual refund.
                     </>
                   ) : (
                     <>
-                      सर्व्हरवर <strong>RAZORPAY_KEY_ID</strong> आणि <strong>RAZORPAY_KEY_SECRET</strong> सेट नसल्यामुळे Razorpay कडे ऑटोमॅटिक रिफंड API विनंती गेली नाही. ऑटोमॅटिक रिफंडसाठी Secrets मध्ये दोन्ही की जोडा, किंवा Razorpay Dashboard मधून मॅन्युअल रिफंड करा.
+                      The automatic refund API request was not sent to Razorpay because <strong>RAZORPAY_KEY_ID</strong> and <strong>RAZORPAY_KEY_SECRET</strong> are not set on the server. Add both keys in Secrets to enable automatic refunds, or issue a manual refund from the Razorpay Dashboard.
                     </>
                   )
                 ) : (
-                  <>तुमची मेंबरशिप रद्द करून अकाउंट Free प्लॅनवर केले आहे.</>
+                  <>Your membership has been cancelled and your account has been switched to the Free plan.</>
                 )}
               </p>
               <p className="font-mono text-[11px] opacity-80">
@@ -624,15 +624,15 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
                     <p className="text-[11px] text-slate-500 leading-relaxed">
                       {user.autoPayEnabled ? (
                         <>
-                          पुढील ऑटो-रिन्यूअल:{' '}
+                          Next auto-renewal:{' '}
                           <strong className="text-slate-700">
                             ₹{getPlanCyclePrice(currentPlan as 'pro' | 'max' | 'ultra', user.billingCycle || 'monthly').totalINR.toLocaleString('en-IN')}
                           </strong>{' '}
-                          ({cycleOpt?.label || 'Monthly'}) • UPI AutoPay / Card वरून आपोआप रिन्यू होईल.
+                          ({cycleOpt?.label || 'Monthly'}) • Will renew automatically via UPI AutoPay / Card.
                         </>
                       ) : (
                         <>
-                          AutoPay बंद आहे. मेंबरशिप आपोआप रिन्यू होण्यासाठी <strong>Enable AutoPay</strong> वर क्लिक करा.
+                          AutoPay is off. Click <strong>Enable AutoPay</strong> to renew your membership automatically.
                         </>
                       )}
                     </p>
