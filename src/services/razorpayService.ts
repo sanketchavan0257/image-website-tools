@@ -85,13 +85,13 @@ export const PLAN_PRICING: Record<'pro' | 'max' | 'ultra', PlanPricingItem> = {
     id: 'pro',
     name: 'PixiForge Pro',
     badge: 'Popular',
-    amountINR: 9,
+    amountINR: 299,
     amountUSD: 4.99,
     cycles: {
-      monthly: { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
-      '3months': { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
-      '6months': { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
-      yearly: { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
+      monthly: { totalINR: 299, originalINR: 299, perMonthINR: 299, savingsINR: 0 },
+      '3months': { totalINR: 799, originalINR: 897, perMonthINR: 266, savingsINR: 98 },
+      '6months': { totalINR: 1499, originalINR: 1794, perMonthINR: 250, savingsINR: 295 },
+      yearly: { totalINR: 2699, originalINR: 3588, perMonthINR: 225, savingsINR: 889 },
     },
     batchLimit: '100 images per batch',
     fileLimit: '100 MB per file',
@@ -108,13 +108,13 @@ export const PLAN_PRICING: Record<'pro' | 'max' | 'ultra', PlanPricingItem> = {
     id: 'max',
     name: 'PixiForge Max',
     badge: 'High Power',
-    amountINR: 9,
+    amountINR: 599,
     amountUSD: 9.99,
     cycles: {
-      monthly: { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
-      '3months': { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
-      '6months': { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
-      yearly: { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
+      monthly: { totalINR: 599, originalINR: 599, perMonthINR: 599, savingsINR: 0 },
+      '3months': { totalINR: 1599, originalINR: 1797, perMonthINR: 533, savingsINR: 198 },
+      '6months': { totalINR: 2999, originalINR: 3594, perMonthINR: 500, savingsINR: 595 },
+      yearly: { totalINR: 5399, originalINR: 7188, perMonthINR: 450, savingsINR: 1789 },
     },
     batchLimit: '300 images per batch',
     fileLimit: '250 MB per file',
@@ -131,13 +131,13 @@ export const PLAN_PRICING: Record<'pro' | 'max' | 'ultra', PlanPricingItem> = {
     id: 'ultra',
     name: 'PixiForge Ultra',
     badge: 'Ultimate Power',
-    amountINR: 9,
+    amountINR: 1199,
     amountUSD: 19.99,
     cycles: {
-      monthly: { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
-      '3months': { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
-      '6months': { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
-      yearly: { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
+      monthly: { totalINR: 1199, originalINR: 1199, perMonthINR: 1199, savingsINR: 0 },
+      '3months': { totalINR: 3199, originalINR: 3597, perMonthINR: 1066, savingsINR: 398 },
+      '6months': { totalINR: 5999, originalINR: 7194, perMonthINR: 1000, savingsINR: 1195 },
+      yearly: { totalINR: 10799, originalINR: 14388, perMonthINR: 900, savingsINR: 3589 },
     },
     batchLimit: '1,000 images per batch',
     fileLimit: '1,000 MB (1 GB) per file',
@@ -326,7 +326,7 @@ export async function cancelAutoPaySubscription(payload: {
       return {
         success: false,
         mode: data?.mode,
-        error: data?.error || 'AutoPay रद्द करताना अडचण आली.',
+        error: data?.error || 'There was a problem cancelling AutoPay.',
       };
     }
     return data;
@@ -383,7 +383,7 @@ export async function openDirectRazorpayCheckout({
   const isLoaded = await loadRazorpayCheckoutScript();
   if (!isLoaded || !(window as any).Razorpay) {
     if (onFailure) {
-      onFailure('Razorpay Checkout SDK लोड होऊ शकले नाही. कृपया तुमचे इंटरनेट कनेक्शन तपासा.');
+      onFailure('Razorpay Checkout SDK could not be loaded. Please check your internet connection.');
     }
     return;
   }
@@ -479,7 +479,7 @@ export async function openDirectRazorpayCheckout({
         });
         if (!verification.verified) {
           if (onFailure) {
-            onFailure(verification.error || 'पेमेंट सिग्नेचर पडताळणी अयशस्वी झाली.');
+            onFailure(verification.error || 'Payment signature verification failed.');
           }
           return;
         }
@@ -513,14 +513,14 @@ export async function openDirectRazorpayCheckout({
     const rzp = new (window as any).Razorpay(options);
     rzp.on('payment.failed', (response: any) => {
       if (onFailure) {
-        onFailure(response?.error?.description || 'पेमेंट अयशस्वी झाले. कृपया पुन्हा प्रयत्न करा.');
+        onFailure(response?.error?.description || 'Payment failed. Please try again.');
       }
     });
     rzp.open();
   } catch (err: any) {
     console.error('Razorpay open error:', err);
     if (onFailure) {
-      onFailure(err?.message || 'Razorpay उघडताना त्रुटी आली.');
+      onFailure(err?.message || 'An error occurred while opening Razorpay.');
     }
   }
 }
@@ -622,7 +622,7 @@ export async function requestProRataRefund(payload: {
     return {
       success: false,
       mode: 'razorpay_error',
-      error: 'सर्व्हरशी संपर्क होऊ शकला नाही. कृपया पुन्हा प्रयत्न करा.',
+      error: 'Could not reach the server. Please try again.',
     };
   }
 }
