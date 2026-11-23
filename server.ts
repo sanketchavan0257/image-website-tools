@@ -5,7 +5,16 @@ import fs from 'fs';
 import os from 'os';
 import zlib from 'zlib';
 import crypto from 'crypto';
+import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import {
+  COUNTRY_LABELS,
+  getCurrencyConfig,
+  getCurrencyForCountry,
+  resolveCountryCodeFromInput,
+  resolveCountryFromTimeZone,
+  toRazorpayMinorUnits,
+} from './src/config/currencies.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -497,6 +506,83 @@ async function startServer() {
     res.json({ status: 'ok' });
   });
 
+  // Auto-detect visitor country and local Razorpay currency (Proxy headers -> IP geolocation -> Timezone -> Accept-Language)
+  app.get('/api/geo/currency', async (req, res) => {
+    try {
+      const headerCandidates = [
+        req.headers['cf-ipcountry'],
+        req.headers['x-vercel-ip-country'],
+        req.headers['x-appengine-country'],
+        req.headers['cloudfront-viewer-country'],
+        req.headers['x-country-code'],
+      ];
+      let countryCode = '';
+      let source = 'default';
+
+      for (const h of headerCandidates) {
+        const val = Array.isArray(h) ? h[0] : h;
+        const iso = resolveCountryCodeFromInput(val);
+        if (iso && iso !== 'XX' && iso !== 'T1') {
+          countryCode = iso;
+          source = 'server_ip';
+          break;
+        }
+      }
+
+      if (!countryCode) {
+        const ip = extractClientIp(req);
+        if (isPublicIp(ip)) {
+          const ipLoc = await lookupIpLocation(ip);
+          const iso = resolveCountryCodeFromInput(ipLoc.country);
+          if (iso) {
+            countryCode = iso;
+            source = 'server_ip';
+          }
+        }
+      }
+
+      if (!countryCode && req.query?.tz) {
+        const tzCountry = resolveCountryFromTimeZone(String(req.query.tz));
+        if (tzCountry) {
+          countryCode = tzCountry;
+          source = 'timezone';
+        }
+      }
+
+      if (!countryCode) {
+        const acceptLang = String(req.headers['accept-language'] || '');
+        const match = acceptLang.match(/[a-z]{2}[-_]([A-Z]{2})/);
+        if (match?.[1]) {
+          countryCode = match[1].toUpperCase();
+          source = 'locale';
+        }
+      }
+
+      const finalCountry = countryCode || 'US';
+      const currencyCode = getCurrencyForCountry(finalCountry);
+      const currencyCfg = getCurrencyConfig(currencyCode);
+      const label = COUNTRY_LABELS[finalCountry];
+
+      return res.json({
+        success: true,
+        countryCode: finalCountry,
+        countryName: label?.name || finalCountry,
+        currency: currencyCfg.code,
+        symbol: currencyCfg.symbol,
+        source,
+      });
+    } catch {
+      return res.json({
+        success: true,
+        countryCode: 'US',
+        countryName: 'United States',
+        currency: 'USD',
+        symbol: '$',
+        source: 'default',
+      });
+    }
+  });
+
   // Track or upgrade website visit with structured administrative location (country, state, dist, taluka) + timestamp
   app.post('/api/analytics/track', async (req, res) => {
     try {
@@ -875,12 +961,14 @@ async function startServer() {
     }
   });
 
-  // Server-side Razorpay Pro-Rata Refund endpoint
+  // Server-side Razorpay Pro-Rata Refund endpoint (supports all international & INR currencies)
   app.post('/api/refund', async (req, res) => {
     try {
       const {
         paymentId,
+        refundAmount,
         refundAmountINR,
+        currency,
         plan,
         billingCycle,
         userId,
@@ -889,7 +977,10 @@ async function startServer() {
         totalDays,
       } = req.body || {};
 
-      const numericRefund = Number(refundAmountINR);
+      const numericRefund = Number(refundAmount ?? refundAmountINR);
+      const requestedCurrency = currency ? getCurrencyConfig(String(currency)).code : '';
+      let effectiveCurrency = requestedCurrency || 'INR';
+
       if (!Number.isFinite(numericRefund) || numericRefund < 0) {
         return res.status(400).json({
           success: false,
@@ -903,6 +994,8 @@ async function startServer() {
           mode: 'no_refund_needed',
           refundId: `rfnd_zero_${Date.now()}`,
           status: 'processed',
+          currency: effectiveCurrency,
+          refundAmount: 0,
           refundAmountINR: 0,
         });
       }
@@ -918,6 +1011,8 @@ async function startServer() {
           mode: 'no_refund_needed',
           refundId: `rfnd_nopay_${Date.now()}`,
           status: 'no_gateway_payment',
+          currency: effectiveCurrency,
+          refundAmount: 0,
           refundAmountINR: 0,
         });
       }
@@ -931,7 +1026,28 @@ async function startServer() {
 
       if (hasValidLiveCreds) {
         const authHeader = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
-        const amountPaise = Math.round(numericRefund * 100);
+
+        // Verify original payment currency directly from Razorpay when not explicitly supplied
+        if (!requestedCurrency) {
+          try {
+            const payRes = await fetch(
+              `https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`,
+              {
+                headers: { Authorization: `Basic ${authHeader}` },
+              }
+            );
+            if (payRes.ok) {
+              const payData = (await payRes.json().catch(() => ({}))) as any;
+              if (payData?.currency) {
+                effectiveCurrency = getCurrencyConfig(String(payData.currency)).code;
+              }
+            }
+          } catch {
+            // Keep fallback effectiveCurrency
+          }
+        }
+
+        const amountMinor = toRazorpayMinorUnits(numericRefund, effectiveCurrency);
 
         const rzpResponse = await fetch(
           `https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refund`,
@@ -942,10 +1058,11 @@ async function startServer() {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              amount: amountPaise,
+              amount: amountMinor,
               speed: 'optimum',
               notes: {
                 reason: 'Pro-rata membership cancellation',
+                currency: effectiveCurrency,
                 plan: String(plan || ''),
                 billingCycle: String(billingCycle || ''),
                 daysUsed: String(daysUsed ?? ''),
@@ -969,6 +1086,8 @@ async function startServer() {
               mode: 'razorpay_api',
               refundId: `rfnd_already_${Date.now()}`,
               status: 'already_refunded',
+              currency: effectiveCurrency,
+              refundAmount: numericRefund,
               refundAmountINR: numericRefund,
             });
           }
@@ -983,6 +1102,8 @@ async function startServer() {
               mode: 'pending_gateway_secret',
               refundId: `rfnd_unmatched_${Date.now()}`,
               status: 'no_gateway_payment_found',
+              currency: effectiveCurrency,
+              refundAmount: 0,
               refundAmountINR: 0,
               warning: errDesc,
             });
@@ -1000,6 +1121,8 @@ async function startServer() {
           mode: 'razorpay_api',
           refundId: rzpData.id || `rfnd_${Date.now()}`,
           status: rzpData.status || 'processed',
+          currency: rzpData.currency || effectiveCurrency,
+          refundAmount: numericRefund,
           refundAmountINR: numericRefund,
         });
       }
@@ -1011,6 +1134,8 @@ async function startServer() {
         mode: 'pending_gateway_secret',
         refundId: `rfnd_req_${Date.now()}`,
         status: 'pending_gateway_secret',
+        currency: effectiveCurrency,
+        refundAmount: numericRefund,
         refundAmountINR: numericRefund,
       });
     } catch (err: any) {
@@ -1025,11 +1150,13 @@ async function startServer() {
   // Cache created Razorpay Plan IDs per key/tier/cycle/amount to avoid duplicate plan creation on every checkout
   const cachedRazorpayPlans = new Map<string, string>();
 
-  // Server-side Razorpay Standard One-Time Order creation endpoint (No AutoPay / No Mandate fees)
+  // Server-side Razorpay Standard One-Time Order creation endpoint (Multi-currency)
   app.post('/api/order/create', async (req, res) => {
     try {
-      const { plan, billingCycle, amountINR, userId, userEmail, userName } = req.body || {};
-      const numericAmount = Number(amountINR);
+      const { plan, billingCycle, amount, amountINR, currency, userId, userEmail, userName } =
+        req.body || {};
+      const numericAmount = Number(amount ?? amountINR);
+      const currencyCfg = getCurrencyConfig(currency ? String(currency) : 'INR');
       if (!plan || !Number.isFinite(numericAmount) || numericAmount <= 0) {
         return res.status(400).json({
           success: false,
@@ -1049,12 +1176,13 @@ async function startServer() {
           success: true,
           mode: 'client_direct_checkout',
           orderId: null,
+          currency: currencyCfg.code,
           keyId: keyId || undefined,
         });
       }
 
       const authHeader = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
-      const amountPaise = Math.round(numericAmount * 100);
+      const amountMinor = toRazorpayMinorUnits(numericAmount, currencyCfg.code);
       const receipt = `pf_${String(plan).slice(0, 6)}_${Date.now()}`.slice(0, 40);
 
       const orderRes = await fetch('https://api.razorpay.com/v1/orders', {
@@ -1064,13 +1192,14 @@ async function startServer() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          amount: amountPaise,
-          currency: 'INR',
+          amount: amountMinor,
+          currency: currencyCfg.code,
           receipt,
           payment_capture: 1,
           notes: {
             plan: String(plan),
             billingCycle: String(billingCycle || 'monthly'),
+            currency: currencyCfg.code,
             autoPay: 'disabled',
             userId: String(userId || ''),
             userEmail: String(userEmail || ''),
@@ -1085,6 +1214,7 @@ async function startServer() {
           success: true,
           mode: 'client_direct_checkout',
           orderId: null,
+          currency: currencyCfg.code,
           keyId,
           warning: orderData?.error?.description || 'Razorpay Order creation skipped; using direct checkout.',
         });
@@ -1095,7 +1225,7 @@ async function startServer() {
         mode: 'razorpay_order',
         orderId: orderData.id,
         amount: orderData.amount,
-        currency: orderData.currency || 'INR',
+        currency: orderData.currency || currencyCfg.code,
         keyId,
       });
     } catch (err: any) {
@@ -1188,11 +1318,13 @@ async function startServer() {
     }
   });
 
-  // Server-side Razorpay AutoPay Subscription creation endpoint (UPI AutoPay / Card e-Mandate)
+  // Server-side Razorpay AutoPay Subscription creation endpoint (Multi-currency)
   app.post('/api/subscription/create', async (req, res) => {
     try {
-      const { plan, billingCycle, amountINR, userId, userEmail, userName } = req.body || {};
-      const numericAmount = Number(amountINR);
+      const { plan, billingCycle, amount, amountINR, currency, userId, userEmail, userName } =
+        req.body || {};
+      const numericAmount = Number(amount ?? amountINR);
+      const currencyCfg = getCurrencyConfig(currency ? String(currency) : 'INR');
       if (!plan || !Number.isFinite(numericAmount) || numericAmount <= 0) {
         return res.status(400).json({
           success: false,
@@ -1207,21 +1339,18 @@ async function startServer() {
         Boolean(keySecret) &&
         keyId !== 'rzp_test_1DP5mmOlF5G5ag';
 
-      // Guard: Razorpay Subscriptions / AutoPay Mandate on very low amounts (< ₹5, e.g. ₹1)
-      // triggers auth-token reversals and gateway/mandate + GST charges directly from merchant balance.
-      if (numericAmount < 5) {
+      // Guard: Razorpay Subscriptions on very low amounts triggers auth reversals / mandate charges
+      if (numericAmount < currencyCfg.minAutoPayAmount) {
         return res.json({
           success: true,
           mode: 'low_amount_one_time_guard',
           subscriptionId: null,
           keyId: hasValidLiveCreds ? keyId : undefined,
-          warning:
-            'For amounts below ₹5 (e.g. ₹1), Razorpay AutoPay mandate fees are deducted from the merchant account, so a one-time payment is being used instead.',
+          warning: `AutoPay mandate requires at least ${currencyCfg.symbol}${currencyCfg.minAutoPayAmount}; proceeding with standard One-Time Payment.`,
         });
       }
 
       if (!hasValidLiveCreds) {
-        // Fallback when server secret is not yet added: client proceeds with Checkout + AutoPay preference saved
         return res.json({
           success: true,
           mode: 'checkout_with_autopay_preference',
@@ -1238,10 +1367,10 @@ async function startServer() {
       };
       const cycleKey = String(billingCycle || 'monthly');
       const cycleCfg = cycleMap[cycleKey] || cycleMap.monthly;
-      const amountPaise = Math.round(numericAmount * 100);
-      const planCacheKey = `${keyId}_${String(plan)}_${cycleKey}_${amountPaise}`;
+      const amountMinor = toRazorpayMinorUnits(numericAmount, currencyCfg.code);
+      const planCacheKey = `${keyId}_${String(plan)}_${cycleKey}_${currencyCfg.code}_${amountMinor}`;
 
-      // Step 1: Reuse cached Razorpay Plan ID or create once for this tier + cycle + amount
+      // Step 1: Reuse cached Razorpay Plan ID or create once for this tier + cycle + currency + amount
       let razorpayPlanId = cachedRazorpayPlans.get(planCacheKey) || '';
       if (!razorpayPlanId) {
         const planRes = await fetch('https://api.razorpay.com/v1/plans', {
@@ -1254,14 +1383,15 @@ async function startServer() {
             period: cycleCfg.period,
             interval: cycleCfg.interval,
             item: {
-              name: `PixiForge ${String(plan).toUpperCase()} (${cycleKey})`,
-              amount: amountPaise,
-              currency: 'INR',
-              description: `PixiForge ${String(plan).toUpperCase()} AutoPay Membership`,
+              name: `PixiForge ${String(plan).toUpperCase()} (${cycleKey} • ${currencyCfg.code})`,
+              amount: amountMinor,
+              currency: currencyCfg.code,
+              description: `PixiForge ${String(plan).toUpperCase()} AutoPay Membership (${currencyCfg.code})`,
             },
             notes: {
               plan: String(plan),
               billingCycle: cycleKey,
+              currency: currencyCfg.code,
             },
           }),
         });
@@ -1280,7 +1410,7 @@ async function startServer() {
         cachedRazorpayPlans.set(planCacheKey, razorpayPlanId);
       }
 
-      // Step 2: Create Razorpay Subscription to launch UPI AutoPay / Card Recurring Mandate
+      // Step 2: Create Razorpay Subscription
       const subRes = await fetch('https://api.razorpay.com/v1/subscriptions', {
         method: 'POST',
         headers: {
@@ -1295,6 +1425,7 @@ async function startServer() {
           notes: {
             plan: String(plan),
             billingCycle: cycleKey,
+            currency: currencyCfg.code,
             userId: String(userId || ''),
             userEmail: String(userEmail || ''),
             userName: String(userName || ''),
@@ -1318,6 +1449,7 @@ async function startServer() {
         mode: 'razorpay_subscription',
         subscriptionId: subData.id,
         planId: razorpayPlanId,
+        currency: currencyCfg.code,
         keyId,
       });
     } catch (err: any) {
@@ -1474,29 +1606,243 @@ async function startServer() {
   let serverRmbgReady = false;
   let serverRmbgQueue: Promise<unknown> = Promise.resolve();
 
+  const RMBG_MODEL_URL =
+    'https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx';
+
   const resolveRmbgModelPath = (): string | null => {
     const candidates = [
       path.resolve(__dirname, 'public/mediapipe-models/rmbg-1.4.onnx'),
       path.resolve(__dirname, 'dist/mediapipe-models/rmbg-1.4.onnx'),
+      '/tmp/pixiforge-models/rmbg-1.4.onnx',
     ];
     for (const p of candidates) {
-      if (fs.existsSync(p)) return p;
+      if (fs.existsSync(p) && fs.statSync(p).size > 1_000_000) return p;
     }
     return null;
+  };
+
+  const ensureRmbgModelPath = async (): Promise<string> => {
+    const existing = resolveRmbgModelPath();
+    if (existing) return existing;
+
+    const targetDirs = [
+      path.resolve(__dirname, 'public/mediapipe-models'),
+      '/tmp/pixiforge-models',
+    ];
+    let destPath = '/tmp/pixiforge-models/rmbg-1.4.onnx';
+    for (const dir of targetDirs) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        destPath = path.join(dir, 'rmbg-1.4.onnx');
+        break;
+      } catch {
+        // Fallback to /tmp if app folder is read-only
+      }
+    }
+
+    const tmpPath = `${destPath}.${process.pid}.tmp`;
+    const response = await fetch(RMBG_MODEL_URL);
+    if (!response.ok) {
+      throw new Error(`RMBG-1.4 ONNX model download failed with HTTP ${response.status}.`);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.byteLength < 1_000_000) {
+      throw new Error('Downloaded RMBG-1.4 ONNX file is invalid or incomplete.');
+    }
+    fs.writeFileSync(tmpPath, buffer);
+    fs.renameSync(tmpPath, destPath);
+    return destPath;
+  };
+
+  const decodeImageBufferToRgb1024 = (imgBuf: Buffer): Promise<Buffer> => {
+    return new Promise((resolve, reject) => {
+      const proc = spawn('ffmpeg', [
+        '-v',
+        'error',
+        '-i',
+        'pipe:0',
+        '-vf',
+        'scale=1024:1024:flags=bilinear',
+        '-f',
+        'rawvideo',
+        '-pix_fmt',
+        'rgb24',
+        'pipe:1',
+      ]);
+      const chunks: Buffer[] = [];
+      let stderr = '';
+      proc.stdout.on('data', (d: Buffer) => chunks.push(d));
+      proc.stderr.on('data', (d: Buffer) => {
+        stderr += d.toString();
+      });
+      proc.on('error', reject);
+      proc.on('close', (code) => {
+        const out = Buffer.concat(chunks);
+        if (code === 0 && out.byteLength === 1024 * 1024 * 3) {
+          resolve(out);
+        } else {
+          reject(new Error(`ffmpeg decode failed (code=${code}, bytes=${out.byteLength}): ${stderr}`));
+        }
+      });
+      proc.stdin.write(imgBuf);
+      proc.stdin.end();
+    });
+  };
+
+  const finalizeAlphaMask1024 = (rawOut: Float32Array): Buffer => {
+    const W = 1024;
+    const H = 1024;
+    const TOTAL = W * H;
+
+    let minVal = Infinity;
+    let maxVal = -Infinity;
+    for (let i = 0; i < TOTAL; i++) {
+      const v = rawOut[i];
+      if (v < minVal) minVal = v;
+      if (v > maxVal) maxVal = v;
+    }
+    const span = maxVal - minVal;
+    const conf = new Float32Array(TOTAL);
+    if (span > 1e-5) {
+      const invSpan = 1 / span;
+      for (let i = 0; i < TOTAL; i++) {
+        const norm = (rawOut[i] - minVal) * invSpan;
+        conf[i] = norm <= 0 ? 0 : norm >= 1 ? 1 : norm;
+      }
+    } else {
+      for (let i = 0; i < TOTAL; i++) {
+        const norm = rawOut[i];
+        conf[i] = norm <= 0 ? 0 : norm >= 1 ? 1 : norm;
+      }
+    }
+
+    const BG_CUT = 0.24;
+    const FG_LOCK = 0.76;
+    const cSpan = FG_LOCK - BG_CUT;
+    const alpha = Buffer.allocUnsafe(TOTAL);
+
+    for (let i = 0; i < TOTAL; i++) {
+      const c = conf[i];
+      if (c >= FG_LOCK) {
+        alpha[i] = 255;
+      } else if (c <= BG_CUT) {
+        alpha[i] = 0;
+      } else {
+        const t = (c - BG_CUT) / cSpan;
+        alpha[i] = Math.round(t * t * (3 - 2 * t) * 255);
+      }
+    }
+
+    // Flood-fill exterior background from border so genuine enclosed gaps stay transparent
+    const exteriorBg = new Uint8Array(TOTAL);
+    const queue = new Int32Array(TOTAL);
+    let head = 0;
+    let tail = 0;
+    const trySeed = (idx: number) => {
+      if (exteriorBg[idx] === 0 && alpha[idx] < 128) {
+        exteriorBg[idx] = 1;
+        queue[tail++] = idx;
+      }
+    };
+    for (let x = 0; x < W; x++) {
+      trySeed(x);
+      trySeed((H - 1) * W + x);
+    }
+    for (let y = 0; y < H; y++) {
+      trySeed(y * W);
+      trySeed(y * W + (W - 1));
+    }
+    while (head < tail) {
+      const curr = queue[head++];
+      const cx = curr % W;
+      const cy = (curr - cx) / W;
+      if (cx > 0) trySeed(curr - 1);
+      if (cx < W - 1) trySeed(curr + 1);
+      if (cy > 0) trySeed(curr - W);
+      if (cy < H - 1) trySeed(curr + W);
+    }
+
+    // Fill only tiny digital pinholes (<= 36px)
+    const visited = new Uint8Array(TOTAL);
+    const compQ = new Int32Array(TOTAL);
+    for (let i = 0; i < TOTAL; i++) {
+      if (exteriorBg[i] === 0 && alpha[i] < 128 && visited[i] === 0) {
+        let ch = 0;
+        let ct = 0;
+        let cSum = 0;
+        visited[i] = 1;
+        compQ[ct++] = i;
+        while (ch < ct) {
+          const curr = compQ[ch++];
+          cSum += conf[curr];
+          const cx = curr % W;
+          const cy = (curr - cx) / W;
+          const pushN = (n: number) => {
+            if (exteriorBg[n] === 0 && alpha[n] < 128 && visited[n] === 0) {
+              visited[n] = 1;
+              compQ[ct++] = n;
+            }
+          };
+          if (cx > 0) pushN(curr - 1);
+          if (cx < W - 1) pushN(curr + 1);
+          if (cy > 0) pushN(curr - W);
+          if (cy < H - 1) pushN(curr + W);
+        }
+        if (ct <= 36 && cSum / ct >= 0.1) {
+          for (let k = 0; k < ct; k++) alpha[compQ[k]] = 255;
+        }
+      }
+    }
+
+    // Remove tiny detached low-confidence floating specks
+    const maxSpeckArea = Math.round(TOTAL * 0.002);
+    visited.fill(0);
+    for (let i = 0; i < TOTAL; i++) {
+      if (alpha[i] > 0 && visited[i] === 0) {
+        let ch = 0;
+        let ct = 0;
+        let peak = 0;
+        visited[i] = 1;
+        compQ[ct++] = i;
+        while (ch < ct) {
+          const curr = compQ[ch++];
+          if (conf[curr] > peak) peak = conf[curr];
+          const cx = curr % W;
+          const cy = (curr - cx) / W;
+          const pushFg = (n: number) => {
+            if (alpha[n] > 0 && visited[n] === 0) {
+              visited[n] = 1;
+              compQ[ct++] = n;
+            }
+          };
+          if (cx > 0) pushFg(curr - 1);
+          if (cx < W - 1) pushFg(curr + 1);
+          if (cy > 0) pushFg(curr - W);
+          if (cy < H - 1) pushFg(curr + W);
+        }
+        if (ct <= maxSpeckArea && peak < 0.85) {
+          for (let k = 0; k < ct; k++) alpha[compQ[k]] = 0;
+        }
+      }
+    }
+
+    return alpha;
   };
 
   const getServerRmbgSession = async () => {
     if (!serverRmbgSessionPromise) {
       serverRmbgSessionPromise = (async () => {
-        const modelPath = resolveRmbgModelPath();
-        if (!modelPath) {
-          throw new Error('RMBG-1.4 ONNX model file not found on server.');
-        }
+        const modelPath = await ensureRmbgModelPath();
         const ortMod = await import('onnxruntime-node');
         const ortNode = ortMod.default || ortMod;
+        const cpuThreads = Math.max(2, os.cpus().length || 2);
         const sess = await ortNode.InferenceSession.create(modelPath, {
           executionProviders: ['cpu'],
           graphOptimizationLevel: 'all',
+          intraOpNumThreads: cpuThreads,
+          interOpNumThreads: 1,
+          enableCpuMemArena: true,
+          enableMemPattern: true,
         });
         serverRmbgReady = true;
         return { ortNode, sess };
@@ -1519,7 +1865,7 @@ async function startServer() {
   app.post(
     '/api/remove-background',
     express.raw({
-      type: ['application/octet-stream', 'application/x-gzip'],
+      type: ['image/jpeg', 'image/webp', 'image/png', 'application/octet-stream', 'application/x-gzip'],
       limit: '10mb',
     }),
     async (req, res) => {
@@ -1529,11 +1875,20 @@ async function startServer() {
           return res.status(400).json({ error: 'Empty payload' });
         }
 
+        const contentType = String(req.headers['content-type'] || '').toLowerCase();
+        const isEncodedImage = contentType.startsWith('image/');
         const isGzip =
           req.headers['x-payload-encoding'] === 'gzip' ||
-          req.headers['content-type'] === 'application/x-gzip';
+          contentType === 'application/x-gzip';
+
         let rgbBuf: Buffer;
-        if (isGzip) {
+        if (isEncodedImage) {
+          try {
+            rgbBuf = await decodeImageBufferToRgb1024(rawBody);
+          } catch {
+            return res.status(400).json({ error: 'Invalid image payload' });
+          }
+        } else if (isGzip) {
           try {
             rgbBuf = zlib.gunzipSync(rawBody);
           } catch {
@@ -1561,6 +1916,9 @@ async function startServer() {
           tensorData[2 * TOTAL + i] = rgbBuf[p + 2] * inv255 - 0.5;
         }
 
+        const wantFinalized = req.headers['x-accept-mask-finalized'] === '1';
+        const wantGzipMask = req.headers['x-accept-mask-gzip'] === '1';
+
         const nextMaskPromise: Promise<Buffer> = serverRmbgQueue
           .catch(() => {})
           .then(async (): Promise<Buffer> => {
@@ -1569,6 +1927,10 @@ async function startServer() {
             const inputTensor = new ortNode.Tensor('float32', tensorData, [1, 3, SIZE, SIZE]);
             const outputs = await sess.run({ [inputName]: inputTensor });
             const rawOut = outputs[sess.outputNames[0]].data as Float32Array;
+
+            if (wantFinalized) {
+              return finalizeAlphaMask1024(rawOut);
+            }
 
             let minVal = Infinity;
             let maxVal = -Infinity;
@@ -1597,10 +1959,13 @@ async function startServer() {
 
         res.setHeader('Content-Type', 'application/octet-stream');
         res.setHeader('Cache-Control', 'no-store');
-        if (String(req.headers['accept-encoding'] || '').includes('gzip')) {
-          const gz = zlib.gzipSync(maskBuffer);
-          res.setHeader('Content-Encoding', 'gzip');
-          return res.send(gz);
+        if (wantFinalized) {
+          res.setHeader('X-Mask-Finalized', '1');
+        }
+        if (wantGzipMask) {
+          const gzMask = zlib.gzipSync(maskBuffer);
+          res.setHeader('X-Mask-Encoding', 'gzip');
+          return res.send(gzMask);
         }
         return res.send(maskBuffer);
       } catch (err: any) {
@@ -1617,7 +1982,7 @@ async function startServer() {
     app.use(
       '/mediapipe-wasm',
       express.static(mediapipeWasmDir, {
-        fallthrough: false,
+        fallthrough: true,
         setHeaders: (res, filePath) => {
           if (filePath.endsWith('.wasm')) {
             res.setHeader('Content-Type', 'application/wasm');
@@ -1626,7 +1991,8 @@ async function startServer() {
           }
           res.setHeader('Cache-Control', 'public, max-age=86400');
         },
-      })
+      }),
+      (_req, res) => res.status(404).end()
     );
   }
 
@@ -1637,14 +2003,15 @@ async function startServer() {
     app.use(
       '/mediapipe-models',
       express.static(mediapipeModelsDir, {
-        fallthrough: false,
+        fallthrough: true,
         setHeaders: (res, filePath) => {
           if (filePath.endsWith('.tflite') || filePath.endsWith('.onnx')) {
             res.setHeader('Content-Type', 'application/octet-stream');
           }
           res.setHeader('Cache-Control', 'public, max-age=86400');
         },
-      })
+      }),
+      (_req, res) => res.status(404).end()
     );
   }
 
@@ -1655,7 +2022,7 @@ async function startServer() {
     app.use(
       '/ort-wasm',
       express.static(ortWasmDir, {
-        fallthrough: false,
+        fallthrough: true,
         setHeaders: (res, filePath) => {
           if (filePath.endsWith('.wasm')) {
             res.setHeader('Content-Type', 'application/wasm');
@@ -1664,7 +2031,8 @@ async function startServer() {
           }
           res.setHeader('Cache-Control', 'public, max-age=86400');
         },
-      })
+      }),
+      (_req, res) => res.status(404).end()
     );
   }
 
