@@ -14,6 +14,7 @@ import {
   requestProRataRefund,
   cancelAutoPaySubscription,
 } from '../services/razorpayService';
+import { formatCurrency, roundCurrencyAmount } from '../config/currencies';
 import { AdminAnalystView } from '../components/admin/AdminAnalystView';
 import {
   ArrowLeft,
@@ -33,7 +34,7 @@ import {
   X,
   Lock,
   ArrowRight,
-  IndianRupee,
+  Globe,
   Calendar,
   BarChart3,
 } from 'lucide-react';
@@ -63,6 +64,7 @@ function mapFirestoreToProfile(fs: FirestoreUserData): UserProfile {
     autoPayUpdatedAt: fs.autoPayUpdatedAt,
     lastPaymentId: fs.lastPaymentId,
     lastPaymentAmount: fs.lastPaymentAmount,
+    lastPaymentCurrency: fs.lastPaymentCurrency,
     lastPaymentDate: fs.lastPaymentDate,
     paymentHistory: fs.paymentHistory as any,
     createdAt: fs.createdAt || new Date().toISOString(),
@@ -156,6 +158,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
     const activeRecord = history.find(
       (r) => r.status !== 'cancelled_refunded' && r.status !== 'refund_pending'
     );
+    const currency = activeRecord?.currency || target.lastPaymentCurrency || 'INR';
     const realPaymentId = activeRecord?.paymentId || target.lastPaymentId || '';
     const hasRealPayment = Boolean(realPaymentId && !realPaymentId.startsWith('pay_usr_'));
     const amount = !hasRealPayment
@@ -167,20 +170,22 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
       : target.plan !== 'free'
       ? getPlanCyclePrice(
           target.plan as 'pro' | 'max' | 'ultra',
-          target.billingCycle || 'monthly'
-        ).totalINR
+          target.billingCycle || 'monthly',
+          currency
+        ).totalAmount
       : 0;
     const cycle = target.billingCycle || activeRecord?.billingCycle || 'monthly';
     const startDate = activeRecord?.date || target.lastPaymentDate || target.createdAt;
     const expiresAt = target.planExpiresAt || activeRecord?.expiresAt;
-    return { amount, cycle, startDate, expiresAt, paymentId: realPaymentId, hasRealPayment };
+    return { amount, currency, cycle, startDate, expiresAt, paymentId: realPaymentId, hasRealPayment };
   };
 
   const openActionModal = (targetUser: UserProfile, mode: AdminActionMode) => {
     setModalError(null);
     const paid = getUserPaidInfo(targetUser);
     const proRata = calculateProRataRefund({
-      paidAmountINR: paid.amount,
+      paidAmount: paid.amount,
+      currency: paid.currency,
       billingCycle: paid.cycle,
       startDate: paid.startDate,
       expiresAt: paid.expiresAt,
@@ -219,7 +224,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
         setActionBanner({
           title: `${targetUser.name}: Only AutoPay Cancelled`,
           detail:
-            'Future automatic renewal payments have been stopped (₹0 refund). Their current membership will remain active until expiry.',
+            'Future automatic renewal payments have been stopped (0 refund). Their current membership will remain active until expiry.',
         });
         return;
       }
@@ -233,7 +238,8 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
       }
 
       const defaultProRata = calculateProRataRefund({
-        paidAmountINR: paid.amount,
+        paidAmount: paid.amount,
+        currency: paid.currency,
         billingCycle: paid.cycle,
         startDate: paid.startDate,
         expiresAt: paid.expiresAt,
@@ -245,35 +251,41 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
       );
       const proRataDeducted = Math.min(
         paid.amount,
-        Math.round((paid.amount / defaultProRata.totalDays) * clampedDays)
+        roundCurrencyAmount((paid.amount / defaultProRata.totalDays) * clampedDays, paid.currency)
       );
-      const proRataRefundINR = Math.max(0, paid.amount - proRataDeducted);
+      const proRataRefundAmount = roundCurrencyAmount(
+        Math.max(0, paid.amount - proRataDeducted),
+        paid.currency
+      );
 
-      let finalRefundINR =
+      let finalRefundAmount =
         forcePlanCancelOnly || !paid.hasRealPayment
           ? 0
           : mode === 'autopay_full_refund'
           ? paid.amount
-          : proRataRefundINR;
+          : proRataRefundAmount;
       const finalDaysUsed = mode === 'autopay_full_refund' ? 0 : clampedDays;
 
       let refundRes: {
         success: boolean;
         mode?: string;
         refundId?: string;
+        refundAmount?: number;
         refundAmountINR?: number;
         error?: string;
       } = {
         success: true,
         mode: 'no_refund_needed',
         refundId: `rfnd_nopay_${Date.now()}`,
+        refundAmount: 0,
         refundAmountINR: 0,
       };
 
-      if (!forcePlanCancelOnly && paid.hasRealPayment && finalRefundINR > 0) {
+      if (!forcePlanCancelOnly && paid.hasRealPayment && finalRefundAmount > 0) {
         refundRes = await requestProRataRefund({
           paymentId: paid.paymentId,
-          refundAmountINR: finalRefundINR,
+          refundAmount: finalRefundAmount,
+          currency: paid.currency,
           plan: targetUser.plan,
           billingCycle: paid.cycle,
           userId: targetUser.id,
@@ -286,8 +298,10 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
           setModalError(refundRes.error || 'Failed to process refund. Please try again.');
           return;
         }
-        if (typeof refundRes.refundAmountINR === 'number') {
-          finalRefundINR = refundRes.refundAmountINR;
+        if (typeof refundRes.refundAmount === 'number') {
+          finalRefundAmount = refundRes.refundAmount;
+        } else if (typeof refundRes.refundAmountINR === 'number') {
+          finalRefundAmount = refundRes.refundAmountINR;
         }
       }
 
@@ -296,7 +310,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
         refundType: mode === 'autopay_full_refund' ? 'full_autopay' : 'pro_rata',
         paymentId: paid.hasRealPayment ? paid.paymentId : undefined,
         refundId: finalRefundId,
-        refundAmount: finalRefundINR,
+        refundAmount: finalRefundAmount,
         daysUsed: finalDaysUsed,
         mode: refundRes.mode,
         fallbackUser: targetUser,
@@ -322,21 +336,21 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
       );
 
       setModalState(null);
-      const formattedRefund = finalRefundINR.toLocaleString('en-IN');
-      const formattedDeducted = proRataDeducted.toLocaleString('en-IN');
+      const formattedRefund = formatCurrency(finalRefundAmount, paid.currency, { includeCode: true });
+      const formattedDeducted = formatCurrency(proRataDeducted, paid.currency);
       setActionBanner({
         title: !paid.hasRealPayment || forcePlanCancelOnly
           ? `${targetUser.name}: Membership Cancelled (Switched to Free)`
           : mode === 'autopay_full_refund'
-          ? `${targetUser.name}: AutoPay Membership Cancelled — 100% Full Refund ₹${formattedRefund}`
-          : `${targetUser.name}: Membership Cancelled — Pro-Rata Refund ₹${formattedRefund}`,
+          ? `${targetUser.name}: AutoPay Membership Cancelled — 100% Full Refund ${formattedRefund}`
+          : `${targetUser.name}: Membership Cancelled — Pro-Rata Refund ${formattedRefund}`,
         detail: !paid.hasRealPayment
-          ? 'This account had no Razorpay payment transaction. The membership has been removed and switched to Free (₹0 refund).'
+          ? 'This account had no Razorpay payment transaction. The membership has been removed and switched to Free (0 refund).'
           : forcePlanCancelOnly
           ? 'The membership has been cancelled immediately and switched to Free without issuing a gateway refund.'
           : mode === 'autopay_full_refund'
-          ? `The full AutoPay-charged amount (₹${formattedRefund}) has been refunded to the user's original payment method, AutoPay is disabled, and the plan is now Free.`
-          : `Deducted ₹${formattedDeducted} for ${finalDaysUsed} used day(s) and refunded the remaining ₹${formattedRefund} to the user's account. Plan is now Free.`,
+          ? `The full AutoPay-charged amount (${formattedRefund}) has been refunded to the user's original payment method, AutoPay is disabled, and the plan is now Free.`
+          : `Deducted ${formattedDeducted} for ${finalDaysUsed} used day(s) and refunded the remaining ${formattedRefund} to the user's account. Plan is now Free.`,
         refundId: paid.hasRealPayment && !forcePlanCancelOnly ? finalRefundId : undefined,
       });
     } finally {
@@ -408,7 +422,17 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
   const totalUsers = usersList.length;
   const paidUsers = usersList.filter((u) => u.plan !== 'free');
   const autoPayUsers = usersList.filter((u) => u.autoPayEnabled);
-  const totalActiveRevenue = paidUsers.reduce((acc, u) => acc + getUserPaidInfo(u).amount, 0);
+  const revenueByCurrency = paidUsers.reduce<Record<string, number>>((acc, u) => {
+    const info = getUserPaidInfo(u);
+    acc[info.currency] = roundCurrencyAmount((acc[info.currency] || 0) + info.amount, info.currency);
+    return acc;
+  }, {});
+  const formattedActiveRevenue =
+    Object.keys(revenueByCurrency).length === 0
+      ? formatCurrency(0, 'INR')
+      : Object.entries(revenueByCurrency)
+          .map(([curr, amt]) => formatCurrency(amt, curr))
+          .join(' + ');
 
   // Filter + Search
   const filteredUsers = usersList.filter((u) => {
@@ -432,23 +456,27 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
     ? (() => {
         const paid = getUserPaidInfo(modalState.targetUser);
         const proRata = calculateProRataRefund({
-          paidAmountINR: paid.amount,
+          paidAmount: paid.amount,
+          currency: paid.currency,
           billingCycle: paid.cycle,
           startDate: paid.startDate,
           expiresAt: paid.expiresAt,
         });
         const clampedDays = Math.min(proRata.totalDays, Math.max(0, Math.round(customDaysUsed || 0)));
-        const deductedINR = Math.min(
+        const deductedAmount = Math.min(
           paid.amount,
-          Math.round((paid.amount / proRata.totalDays) * clampedDays)
+          roundCurrencyAmount((paid.amount / proRata.totalDays) * clampedDays, paid.currency)
         );
-        const proRataRefundINR = Math.max(0, paid.amount - deductedINR);
+        const proRataRefundAmount = roundCurrencyAmount(
+          Math.max(0, paid.amount - deductedAmount),
+          paid.currency
+        );
         return {
           paid,
           proRata,
           clampedDays,
-          deductedINR,
-          proRataRefundINR,
+          deductedAmount,
+          proRataRefundAmount,
         };
       })()
     : null;
@@ -597,10 +625,10 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
           <div className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-2xs">
             <div className="flex items-center justify-between text-slate-400 text-xs font-semibold">
               <span>Active Plan Value</span>
-              <IndianRupee className="w-4 h-4 text-amber-600" />
+              <Globe className="w-4 h-4 text-amber-600" />
             </div>
-            <div className="text-2xl font-black text-slate-900 mt-1.5">
-              ₹{totalActiveRevenue.toLocaleString('en-IN')}
+            <div className="text-xl sm:text-2xl font-black text-slate-900 mt-1.5 truncate" title={formattedActiveRevenue}>
+              {formattedActiveRevenue}
             </div>
           </div>
         </div>
@@ -762,7 +790,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
                       {isPaid ? (
                         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-600 pt-0.5">
                           <span>
-                            Paid: <strong className="text-slate-900">₹{paidInfo.amount.toLocaleString('en-IN')}</strong> ({cycleLabel})
+                            Paid: <strong className="text-slate-900">{formatCurrency(paidInfo.amount, paidInfo.currency, { includeCode: true })}</strong> ({cycleLabel})
                           </span>
                           {member.planExpiresAt && (
                             <span className="inline-flex items-center gap-1">
@@ -814,7 +842,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
                         title="Cancel AutoPay Membership with 100% Full Refund"
                       >
                         <RotateCcw className="w-3.5 h-3.5" />
-                        <span>AutoPay Membership Cancel (Full ₹{paidInfo.amount})</span>
+                        <span>AutoPay Membership Cancel (Full {formatCurrency(paidInfo.amount, paidInfo.currency)})</span>
                       </button>
 
                       <button
@@ -921,17 +949,19 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
                 <div className="flex items-center justify-between">
                   <span className="text-slate-600">Plan Amount Paid</span>
                   <span className="font-bold text-slate-900">
-                    ₹{modalBreakdown.paid.amount.toLocaleString('en-IN')}
+                    {formatCurrency(modalBreakdown.paid.amount, modalBreakdown.paid.currency, { includeCode: true })}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-slate-600">Usage Deduction</span>
-                  <span className="font-bold text-emerald-700">₹0 (100% Full AutoPay Refund)</span>
+                  <span className="font-bold text-emerald-700">
+                    {formatCurrency(0, modalBreakdown.paid.currency)} (100% Full AutoPay Refund)
+                  </span>
                 </div>
                 <div className="pt-2 border-t border-blue-200 flex items-center justify-between">
                   <span className="font-extrabold text-slate-900">Full Refund to User Account</span>
                   <span className="text-lg font-black text-blue-700">
-                    ₹{modalBreakdown.paid.amount.toLocaleString('en-IN')}
+                    {formatCurrency(modalBreakdown.paid.amount, modalBreakdown.paid.currency, { includeCode: true })}
                   </span>
                 </div>
               </div>
@@ -942,13 +972,13 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
                 <div className="flex items-center justify-between">
                   <span className="text-slate-500">Total Paid ({modalBreakdown.proRata.totalDays} days)</span>
                   <span className="font-bold text-slate-900">
-                    ₹{modalBreakdown.paid.amount.toLocaleString('en-IN')}
+                    {formatCurrency(modalBreakdown.paid.amount, modalBreakdown.paid.currency, { includeCode: true })}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-slate-500">Per-Day Rate</span>
                   <span className="font-semibold text-slate-700">
-                    ₹{modalBreakdown.proRata.perDayRateINR} / day
+                    {formatCurrency(modalBreakdown.proRata.perDayRate, modalBreakdown.paid.currency, { forceDecimals: true })} / day
                   </span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
@@ -968,13 +998,13 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
                 <div className="flex items-center justify-between text-rose-700">
                   <span>Used Deduction ({modalBreakdown.clampedDays} days)</span>
                   <span className="font-bold">
-                    - ₹{modalBreakdown.deductedINR.toLocaleString('en-IN')}
+                    - {formatCurrency(modalBreakdown.deductedAmount, modalBreakdown.paid.currency)}
                   </span>
                 </div>
                 <div className="pt-2 border-t border-slate-200 flex items-center justify-between">
                   <span className="font-extrabold text-slate-900">Pro-Rata Refund to User Account</span>
                   <span className="text-lg font-black text-emerald-700">
-                    ₹{modalBreakdown.proRataRefundINR.toLocaleString('en-IN')}
+                    {formatCurrency(modalBreakdown.proRataRefundAmount, modalBreakdown.paid.currency, { includeCode: true })}
                   </span>
                 </div>
               </div>
@@ -1026,10 +1056,10 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
                     : modalState.mode === 'only_autopay'
                     ? 'Confirm Only AutoPay Cancel'
                     : !modalBreakdown.paid.hasRealPayment
-                    ? 'Confirm Cancel (Switch to Free • ₹0)'
+                    ? `Confirm Cancel (Switch to Free • ${formatCurrency(0, modalBreakdown.paid.currency)})`
                     : modalState.mode === 'autopay_full_refund'
-                    ? `Confirm Cancel & Full Refund ₹${modalBreakdown.paid.amount.toLocaleString('en-IN')}`
-                    : `Confirm Cancel & Refund ₹${modalBreakdown.proRataRefundINR.toLocaleString('en-IN')}`}
+                    ? `Confirm Cancel & Full Refund ${formatCurrency(modalBreakdown.paid.amount, modalBreakdown.paid.currency)}`
+                    : `Confirm Cancel & Refund ${formatCurrency(modalBreakdown.proRataRefundAmount, modalBreakdown.paid.currency)}`}
                 </span>
               </button>
             </div>
