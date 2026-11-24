@@ -10,6 +10,7 @@ import {
   cancelAutoPaySubscription,
   openDirectRazorpayCheckout,
 } from '../services/razorpayService';
+import { formatCurrency, getCurrencyConfig } from '../config/currencies';
 import { PaymentRecord } from '../types/auth';
 import {
   CreditCard,
@@ -51,6 +52,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [cancelSuccessBanner, setCancelSuccessBanner] = useState<{
     refundAmount: number;
+    currency: string;
     refundId: string;
     daysUsed: number;
     totalDays: number;
@@ -75,6 +77,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
           plan: user.plan,
           billingCycle: user.billingCycle || 'monthly',
           amount: user.lastPaymentAmount || 0,
+          currency: user.lastPaymentCurrency || 'INR',
           date: user.lastPaymentDate || user.createdAt,
           expiresAt: user.planExpiresAt,
           status: 'paid',
@@ -84,8 +87,10 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
     return [];
   })();
 
-  // Determine the active paid record & exact pro-rata refund breakdown
+  // Determine the active paid record, its exact currency, & pro-rata refund breakdown
   const latestPaidRecord = paymentRecords.find((r) => r.status !== 'cancelled_refunded' && r.status !== 'refund_pending');
+  const activeCurrency = latestPaidRecord?.currency || user?.lastPaymentCurrency || 'INR';
+  const activeCurrencyCfg = getCurrencyConfig(activeCurrency);
   const realPaymentId = latestPaidRecord?.paymentId || user?.lastPaymentId || '';
   const hasRealPayment = Boolean(realPaymentId && !realPaymentId.startsWith('pay_usr_'));
   const activePaidAmount = (() => {
@@ -93,14 +98,15 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
     if (latestPaidRecord?.amount && latestPaidRecord.amount > 0) return latestPaidRecord.amount;
     if (user?.lastPaymentAmount && user.lastPaymentAmount > 0) return user.lastPaymentAmount;
     if (currentPlan !== 'free') {
-      return getPlanCyclePrice(currentPlan, user?.billingCycle || 'monthly').totalINR;
+      return getPlanCyclePrice(currentPlan, user?.billingCycle || 'monthly', activeCurrency).totalAmount;
     }
     return 0;
   })();
 
   const activeStartDate = latestPaidRecord?.date || user?.lastPaymentDate || user?.createdAt;
   const refundBreakdown = calculateProRataRefund({
-    paidAmountINR: activePaidAmount,
+    paidAmount: activePaidAmount,
+    currency: activeCurrency,
     billingCycle: user?.billingCycle || latestPaidRecord?.billingCycle || 'monthly',
     startDate: activeStartDate,
     expiresAt: user?.planExpiresAt || latestPaidRecord?.expiresAt,
@@ -126,15 +132,17 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
         });
       }
 
-      let finalRefundAmount = hasRealPayment ? refundBreakdown.refundAmountINR : 0;
+      let finalRefundAmount = hasRealPayment ? refundBreakdown.refundAmount : 0;
+      let finalRefundCurrency = activeCurrency;
       let finalRefundId = `rfnd_nopay_${Date.now()}`;
       let finalMode: string | undefined = 'no_refund_needed';
       let finalStatus: string | undefined = 'processed';
 
-      if (hasRealPayment && refundBreakdown.refundAmountINR > 0) {
+      if (hasRealPayment && refundBreakdown.refundAmount > 0) {
         const apiRes = await requestProRataRefund({
           paymentId: realPaymentId,
-          refundAmountINR: refundBreakdown.refundAmountINR,
+          refundAmount: refundBreakdown.refundAmount,
+          currency: activeCurrency,
           plan: currentPlan,
           billingCycle: user.billingCycle || 'monthly',
           userId: user.id,
@@ -144,14 +152,19 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
         });
 
         if (!apiRes.success) {
-          setCancelError(apiRes.error || 'There was a problem cancelling and processing the refund. Please try again.');
+          setCancelError(apiRes.error || 'रद्द करताना आणि रिफंड प्रोसेस करताना अडचण आली. कृपया पुन्हा प्रयत्न करा.');
           return;
         }
 
         finalRefundId = apiRes.refundId || `rfnd_${Date.now()}`;
         finalMode = apiRes.mode;
         finalStatus = apiRes.status;
-        if (typeof apiRes.refundAmountINR === 'number') {
+        if (apiRes.currency) {
+          finalRefundCurrency = apiRes.currency;
+        }
+        if (typeof apiRes.refundAmount === 'number') {
+          finalRefundAmount = apiRes.refundAmount;
+        } else if (typeof apiRes.refundAmountINR === 'number') {
           finalRefundAmount = apiRes.refundAmountINR;
         }
       }
@@ -169,6 +182,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
       setAutoPayNotice(null);
       setCancelSuccessBanner({
         refundAmount: finalRefundAmount,
+        currency: finalRefundCurrency,
         refundId: finalRefundId,
         daysUsed: refundBreakdown.daysUsed,
         totalDays: refundBreakdown.totalDays,
@@ -192,7 +206,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
       if (!cancelRes.success) {
         setAutoPayNotice({
           type: 'error',
-          message: cancelRes.error || 'There was a problem turning off AutoPay. Please try again.',
+          message: cancelRes.error || 'AutoPay बंद करताना अडचण आली. कृपया पुन्हा प्रयत्न करा.',
         });
         return;
       }
@@ -202,7 +216,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
       });
       setAutoPayNotice({
         type: 'success',
-        message: 'AutoPay has been turned off. Your current plan stays active until its valid end date and you will not be charged automatically next time.',
+        message: 'AutoPay बंद केले आहे. तुमचा सध्याचा प्लॅन वैध तारखेपर्यंत चालू राहील आणि पुढच्या वेळी ऑटोमॅटिक पैसे कट होणार नाहीत.',
       });
     } finally {
       setIsTogglingAutoPay(false);
@@ -213,12 +227,11 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
     if (!user || currentPlan === 'free') return;
     setAutoPayNotice(null);
     const chosenCycle = user.billingCycle || 'monthly';
-    const priceInfo = getPlanCyclePrice(currentPlan as 'pro' | 'max' | 'ultra', chosenCycle);
-    if (priceInfo.totalINR < 5) {
+    const priceInfo = getPlanCyclePrice(currentPlan as 'pro' | 'max' | 'ultra', chosenCycle, activeCurrency);
+    if (priceInfo.totalAmount < activeCurrencyCfg.minAutoPayAmount) {
       setAutoPayNotice({
         type: 'error',
-        message:
-          'For amounts below ₹5 (e.g. ₹1), Razorpay AutoPay mandate fees are deducted from the merchant account. The plan price must be at least ₹5 to enable AutoPay.',
+        message: `AutoPay Mandate requires at least ${formatCurrency(activeCurrencyCfg.minAutoPayAmount, activeCurrency)}.`,
       });
       return;
     }
@@ -226,14 +239,16 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
     await openDirectRazorpayCheckout({
       plan: currentPlan as 'pro' | 'max' | 'ultra',
       billingCycle: chosenCycle,
+      currency: activeCurrency,
       autoPay: true,
       user,
-      onSuccess: (paymentId, paidPlan, amount, paidCycle, autoPayMeta) => {
+      onSuccess: (paymentId, paidPlan, amount, paidCycle, autoPayMeta, paidCurrency) => {
         setIsTogglingAutoPay(false);
         setPlan(paidPlan);
         updateUserPlan(paidPlan, {
           paymentId,
           amount,
+          currency: paidCurrency,
           billingCycle: paidCycle,
           autoPayEnabled: autoPayMeta.autoPayEnabled,
           autoPayStatus: autoPayMeta.autoPayStatus,
@@ -241,14 +256,14 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
         });
         setAutoPayNotice({
           type: 'success',
-          message: 'AutoPay (UPI AutoPay / Card) has been enabled successfully! Your membership will renew automatically on the next billing date.',
+          message: 'AutoPay (UPI AutoPay / Card) यशस्वीरित्या सुरू झाले आहे! पुढील बिलिंग तारखेला मेंबरशिप आपोआप रिन्यू होईल.',
         });
       },
       onFailure: (err) => {
         setIsTogglingAutoPay(false);
         setAutoPayNotice({
           type: 'error',
-          message: err || 'The payment could not be completed while enabling AutoPay.',
+          message: err || 'AutoPay सुरू करताना पेमेंट प्रक्रिया पूर्ण होऊ शकली नाही.',
         });
       },
       onDismiss: () => {
@@ -258,14 +273,15 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
   };
 
   const handleDownloadReceipt = (record: PaymentRecord) => {
+    const recCurrency = record.currency || user?.lastPaymentCurrency || 'INR';
     const cycleLabel = getBillingCycleOption(record.billingCycle || 'monthly').label;
-    const paidDate = new Date(record.date).toLocaleDateString('en-IN', {
+    const paidDate = new Date(record.date).toLocaleDateString('en-US', {
       day: 'numeric',
       month: 'short',
       year: 'numeric',
     });
     const validTill = record.expiresAt
-      ? new Date(record.expiresAt).toLocaleDateString('en-IN', {
+      ? new Date(record.expiresAt).toLocaleDateString('en-US', {
           day: 'numeric',
           month: 'short',
           year: 'numeric',
@@ -284,7 +300,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
       `Plan                 : PixiForge ${record.plan.toUpperCase()}`,
       `Billing Cycle        : ${cycleLabel}`,
       `AutoPay              : ${record.autoPay ? 'Enabled (Auto-Renewal)' : 'One-Time'}`,
-      `Amount Paid          : Rs. ${record.amount} INR`,
+      `Amount Paid          : ${formatCurrency(record.amount, recCurrency, { includeCode: true })}`,
       `Payment Date         : ${paidDate}`,
       `Valid Till           : ${validTill}`,
       `Payment Gateway      : Razorpay Verified`,
@@ -300,13 +316,13 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
     if (record.refundAmount !== undefined) {
       lines.push('----------------------------------------');
       lines.push(`Days Used            : ${record.daysUsed ?? 0} days`);
-      lines.push(`Pro-Rata Refund      : Rs. ${record.refundAmount} INR`);
+      lines.push(`Pro-Rata Refund      : ${formatCurrency(record.refundAmount, recCurrency, { includeCode: true })}`);
       if (record.refundId) {
         lines.push(`Refund Reference ID  : ${record.refundId}`);
       }
       if (record.cancelledAt) {
         lines.push(
-          `Cancelled Date       : ${new Date(record.cancelledAt).toLocaleDateString('en-IN', {
+          `Cancelled Date       : ${new Date(record.cancelledAt).toLocaleDateString('en-US', {
             day: 'numeric',
             month: 'short',
             year: 'numeric',
@@ -458,29 +474,29 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
             <div className="space-y-1 text-xs">
               <h3 className="text-sm font-black">
                 {cancelSuccessBanner.mode === 'razorpay_api'
-                  ? `Membership Cancelled & ₹${cancelSuccessBanner.refundAmount.toLocaleString('en-IN')} Refund Initiated!`
+                  ? `Membership Cancelled & ${formatCurrency(cancelSuccessBanner.refundAmount, cancelSuccessBanner.currency, { includeCode: true })} Refund Initiated!`
                   : cancelSuccessBanner.mode === 'pending_gateway_secret'
-                  ? 'Membership Cancelled — but the refund could not be sent via Razorpay'
+                  ? 'Membership Cancelled — पण Razorpay वर रिफंड पाठवता आला नाही'
                   : 'Membership Cancelled (Switched to Free)'}
               </h3>
               <p className="leading-relaxed opacity-90">
                 {cancelSuccessBanner.mode === 'razorpay_api' ? (
                   <>
-                    The amount for your <strong>{cancelSuccessBanner.daysUsed} days</strong> of usage has been deducted, and the remaining{' '}
-                    <strong>₹{cancelSuccessBanner.refundAmount.toLocaleString('en-IN')}</strong> has been sent to your original payment account (UPI / bank / card) via Razorpay (credited instantly where supported, otherwise within 5–7 working days).
+                    तुमची वापरलेली <strong>{cancelSuccessBanner.daysUsed} दिवसांची</strong> रक्कम वजा करून उरलेले{' '}
+                    <strong>{formatCurrency(cancelSuccessBanner.refundAmount, cancelSuccessBanner.currency, { includeCode: true })}</strong> तुमच्या मूळ पेमेंट अकाउंटवर (UPI / बँक / कार्ड) Razorpay द्वारे पाठवले आहेत (५-७ कामाच्या दिवसांत जमा होतील).
                   </>
                 ) : cancelSuccessBanner.mode === 'pending_gateway_secret' ? (
                   cancelSuccessBanner.status === 'no_gateway_payment_found' ? (
                     <>
-                      This Payment ID was not found under the Razorpay key on your current server (or the payment was made with a different / Test key). Please check the payment in the Razorpay Dashboard or issue a manual refund.
+                      हा Payment ID तुमच्या सध्याच्या सर्व्हरवरील Razorpay Key मध्ये सापडला नाही (किंवा पेमेंट वेगळ्या / Test Key मधून झाले होते). कृपया Razorpay Dashboard मधून पेमेंट तपासा किंवा मॅन्युअल रिफंड करा.
                     </>
                   ) : (
                     <>
-                      The automatic refund API request was not sent to Razorpay because <strong>RAZORPAY_KEY_ID</strong> and <strong>RAZORPAY_KEY_SECRET</strong> are not set on the server. Add both keys in Secrets to enable automatic refunds, or issue a manual refund from the Razorpay Dashboard.
+                      सर्व्हरवर <strong>RAZORPAY_KEY_ID</strong> आणि <strong>RAZORPAY_KEY_SECRET</strong> सेट नसल्यामुळे Razorpay कडे ऑटोमॅटिक रिफंड API विनंती गेली नाही. ऑटोमॅटिक रिफंडसाठी Secrets मध्ये दोन्ही की जोडा, किंवा Razorpay Dashboard मधून मॅन्युअल रिफंड करा.
                     </>
                   )
                 ) : (
-                  <>Your membership has been cancelled and your account has been switched to the Free plan.</>
+                  <>तुमची मेंबरशिप रद्द करून अकाउंट Free प्लॅनवर केले आहे.</>
                 )}
               </p>
               <p className="font-mono text-[11px] opacity-80">
@@ -624,15 +640,22 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
                     <p className="text-[11px] text-slate-500 leading-relaxed">
                       {user.autoPayEnabled ? (
                         <>
-                          Next auto-renewal:{' '}
+                          पुढील ऑटो-रिन्यूअल:{' '}
                           <strong className="text-slate-700">
-                            ₹{getPlanCyclePrice(currentPlan as 'pro' | 'max' | 'ultra', user.billingCycle || 'monthly').totalINR.toLocaleString('en-IN')}
+                            {formatCurrency(
+                              getPlanCyclePrice(
+                                currentPlan as 'pro' | 'max' | 'ultra',
+                                user.billingCycle || 'monthly',
+                                activeCurrency
+                              ).totalAmount,
+                              activeCurrency
+                            )}
                           </strong>{' '}
-                          ({cycleOpt?.label || 'Monthly'}) • Will renew automatically via UPI AutoPay / Card.
+                          ({cycleOpt?.label || 'Monthly'}) • ऑटोमॅटिक रिन्यू होईल.
                         </>
                       ) : (
                         <>
-                          AutoPay is off. Click <strong>Enable AutoPay</strong> to renew your membership automatically.
+                          AutoPay बंद आहे. मेंबरशिप आपोआप रिन्यू होण्यासाठी <strong>Enable AutoPay</strong> वर क्लिक करा.
                         </>
                       )}
                     </p>
@@ -782,8 +805,9 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
         ) : (
           <div className="divide-y divide-slate-100">
             {paymentRecords.map((record) => {
+              const recCurrency = record.currency || user?.lastPaymentCurrency || 'INR';
               const cycleLabel = getBillingCycleOption(record.billingCycle || 'monthly').label;
-              const paidDateStr = new Date(record.date).toLocaleDateString('en-IN', {
+              const paidDateStr = new Date(record.date).toLocaleDateString('en-US', {
                 day: 'numeric',
                 month: 'short',
                 year: 'numeric',
@@ -803,11 +827,11 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
                       </span>
                       {record.status === 'cancelled_refunded' ? (
                         <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
-                          Cancelled • Refunded ₹{record.refundAmount?.toLocaleString('en-IN') ?? 0}
+                          Cancelled • Refunded {formatCurrency(record.refundAmount ?? 0, recCurrency)}
                         </span>
                       ) : record.status === 'refund_pending' ? (
                         <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
-                          Cancelled • Refund ₹{record.refundAmount?.toLocaleString('en-IN') ?? 0} Initiated
+                          Cancelled • Refund {formatCurrency(record.refundAmount ?? 0, recCurrency)} Initiated
                         </span>
                       ) : (
                         <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
@@ -843,11 +867,11 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
                   <div className="flex items-center justify-between sm:justify-end gap-4">
                     <div className="text-right">
                       <span className="text-base font-black text-slate-900 block">
-                        ₹{record.amount.toLocaleString('en-IN')}
+                        {formatCurrency(record.amount, recCurrency)}
                       </span>
                       {isRefunded && record.refundAmount !== undefined && (
                         <span className="text-[11px] font-bold text-emerald-700 block">
-                          Refunded: ₹{record.refundAmount.toLocaleString('en-IN')}
+                          Refunded: {formatCurrency(record.refundAmount, recCurrency)}
                         </span>
                       )}
                     </div>
@@ -900,7 +924,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
                 </h3>
                 <p className="text-xs text-slate-600 mt-1 leading-relaxed">
                   Your <strong className="capitalize">{currentPlan}</strong> ({cycleOpt?.label || 'Monthly'}) pack of{' '}
-                  <strong>₹{refundBreakdown.paidAmountINR.toLocaleString('en-IN')}</strong> is divided by{' '}
+                  <strong>{formatCurrency(refundBreakdown.paidAmount, activeCurrency)}</strong> is divided by{' '}
                   <strong>{refundBreakdown.totalDays} days</strong>:
                 </p>
               </div>
@@ -911,23 +935,23 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
               <div className="p-2.5 rounded-xl bg-white border border-slate-200/80 flex items-center justify-between gap-2">
                 <span className="font-bold text-slate-700">Pack Calculation</span>
                 <span className="font-mono font-black text-slate-900">
-                  ₹{refundBreakdown.paidAmountINR.toLocaleString('en-IN')} ÷ {refundBreakdown.totalDays} days = ₹{refundBreakdown.perDayRateINR}/day
+                  {formatCurrency(refundBreakdown.paidAmount, activeCurrency)} ÷ {refundBreakdown.totalDays} days = {formatCurrency(refundBreakdown.perDayRate, activeCurrency, { forceDecimals: true })}/day
                 </span>
               </div>
 
               <div className="flex items-center justify-between text-slate-600 pt-1">
                 <span>Your Pack Price ({cycleOpt?.label || 'Monthly'})</span>
                 <span className="font-bold text-slate-900">
-                  ₹{refundBreakdown.paidAmountINR.toLocaleString('en-IN')}
+                  {formatCurrency(refundBreakdown.paidAmount, activeCurrency)}
                 </span>
               </div>
 
               <div className="flex items-center justify-between text-rose-700 pb-2.5 border-b border-slate-200">
                 <span>
-                  Used ({refundBreakdown.daysUsed} / {refundBreakdown.totalDays} days × ₹{refundBreakdown.perDayRateINR}/day)
+                  Used ({refundBreakdown.daysUsed} / {refundBreakdown.totalDays} days × {formatCurrency(refundBreakdown.perDayRate, activeCurrency, { forceDecimals: true })}/day)
                 </span>
                 <span className="font-bold">
-                  - ₹{refundBreakdown.usedAmountINR.toLocaleString('en-IN')}
+                  - {formatCurrency(refundBreakdown.usedAmount, activeCurrency)}
                 </span>
               </div>
 
@@ -941,14 +965,14 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
                   </span>
                 </div>
                 <span className="text-2xl font-black text-emerald-700">
-                  ₹{refundBreakdown.refundAmountINR.toLocaleString('en-IN')}
+                  {formatCurrency(refundBreakdown.refundAmount, activeCurrency, { includeCode: true })}
                 </span>
               </div>
             </div>
 
             <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-100 text-[11px] text-blue-900 leading-relaxed">
               Press <strong>OK</strong> to cancel your membership, turn <strong>OFF AutoPay</strong> immediately, switch to the Free plan, and refund{' '}
-              <strong>₹{refundBreakdown.refundAmountINR.toLocaleString('en-IN')}</strong> to your original payment method. Press <strong>Cancel</strong> to keep your plan.
+              <strong>{formatCurrency(refundBreakdown.refundAmount, activeCurrency, { includeCode: true })}</strong> to your original payment method. Press <strong>Cancel</strong> to keep your plan.
             </div>
 
             {cancelError && (
