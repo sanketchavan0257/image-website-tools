@@ -77,6 +77,7 @@ export interface FirestorePaymentRecord {
   plan: 'free' | 'pro' | 'max' | 'ultra';
   billingCycle: 'monthly' | '3months' | '6months' | 'yearly';
   amount: number;
+  currency?: string;
   date: string;
   expiresAt?: string;
   autoPay?: boolean;
@@ -102,6 +103,7 @@ export interface FirestoreUserData {
   autoPayUpdatedAt?: string;
   lastPaymentId?: string;
   lastPaymentAmount?: number;
+  lastPaymentCurrency?: string;
   lastPaymentDate?: string;
   paymentHistory?: FirestorePaymentRecord[];
   createdAt?: string;
@@ -283,6 +285,9 @@ export async function updateUserPlanInFirestore(
       updatePayload.lastPaymentId = paymentInfo.paymentId;
       if (paymentInfo.amount !== undefined) {
         updatePayload.lastPaymentAmount = paymentInfo.amount;
+      }
+      if (paymentInfo.currency) {
+        updatePayload.lastPaymentCurrency = String(paymentInfo.currency).trim().toUpperCase().slice(0, 12);
       }
       updatePayload.lastPaymentDate = now;
     }
