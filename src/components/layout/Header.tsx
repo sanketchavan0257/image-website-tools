@@ -405,8 +405,8 @@ export const Header: React.FC<HeaderProps> = ({ currentPath, onNavigate }) => {
             Help
           </button>
 
-          {/* Tablet-only Other Dropdown (replaces Help on md..lg viewports only) */}
-          <div data-header-dropdown="other" className="relative lg:hidden">
+          {/* Other Dropdown (after Help & before Admin on PC; replaces Help on tablet with Help & Support included inside) */}
+          <div data-header-dropdown="other" className="relative">
             <button
               type="button"
               onClick={() => {
@@ -415,8 +415,10 @@ export const Header: React.FC<HeaderProps> = ({ currentPath, onNavigate }) => {
                 setOtherDropdownOpen(!otherDropdownOpen);
               }}
               className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl whitespace-nowrap transition-colors cursor-pointer ${
-                ['/help', '/terms', '/privacy-policy', '/refund-policy', '/shipping-policy'].includes(currentPath)
+                ['/terms', '/privacy-policy', '/refund-policy', '/shipping-policy'].includes(currentPath)
                   ? 'text-blue-600 font-semibold bg-blue-50'
+                  : currentPath === '/help'
+                  ? 'text-blue-600 font-semibold bg-blue-50 lg:text-slate-600 lg:font-medium lg:bg-transparent lg:hover:text-slate-900 lg:hover:bg-slate-50'
                   : 'hover:text-slate-900 hover:bg-slate-50'
               }`}
             >
@@ -427,11 +429,11 @@ export const Header: React.FC<HeaderProps> = ({ currentPath, onNavigate }) => {
             {otherDropdownOpen && (
               <div className="absolute top-full right-0 mt-2 w-64 bg-white rounded-2xl shadow-xl border border-slate-100 p-2 z-50 animate-fade-in text-xs space-y-0.5">
                 {[
-                  { name: 'Help & Support', path: '/help' },
-                  { name: 'Terms & Conditions', path: '/terms' },
-                  { name: 'Privacy Policy', path: '/privacy-policy' },
-                  { name: 'Refund & Cancellation Policy', path: '/refund-policy' },
-                  { name: 'Shipping / Delivery Policy', path: '/shipping-policy' },
+                  { name: 'Help & Support', path: '/help', tabletOnly: true },
+                  { name: 'Terms & Conditions', path: '/terms', tabletOnly: false },
+                  { name: 'Privacy Policy', path: '/privacy-policy', tabletOnly: false },
+                  { name: 'Refund & Cancellation Policy', path: '/refund-policy', tabletOnly: false },
+                  { name: 'Shipping / Delivery Policy', path: '/shipping-policy', tabletOnly: false },
                 ].map((item) => (
                   <button
                     key={item.path}
@@ -440,7 +442,9 @@ export const Header: React.FC<HeaderProps> = ({ currentPath, onNavigate }) => {
                       onNavigate(item.path);
                       setOtherDropdownOpen(false);
                     }}
-                    className={`w-full text-left px-3 py-2.5 rounded-xl transition-colors flex items-center justify-between cursor-pointer font-semibold ${
+                    className={`${
+                      item.tabletOnly ? 'flex lg:hidden' : 'flex'
+                    } w-full text-left px-3 py-2.5 rounded-xl transition-colors items-center justify-between cursor-pointer font-semibold ${
                       currentPath === item.path
                         ? 'bg-blue-50 text-blue-700'
                         : 'text-slate-700 hover:bg-blue-50/70 hover:text-blue-700'
