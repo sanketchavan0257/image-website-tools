@@ -295,14 +295,11 @@ async function runServerRmbgInference(
 
   onProgress?.('Preparing Photo for HD Cutout...', 22);
 
-  // Encode 1024x1024 as lightweight ~80KB JPEG (20x smaller upload than raw RGB!)
-  let uploadBlob: Blob | null = await new Promise<Blob | null>((resolve) =>
-    resizeCanvas.toBlob((b) => resolve(b), 'image/jpeg', 0.93)
-  );
-  let contentType = 'image/jpeg';
-  let isGzipReq = false;
-
-  if (!uploadBlob) {
+  const buildRawPayload = async (): Promise<{
+    body: Blob;
+    contentType: string;
+    isGzipReq: boolean;
+  }> => {
     const rCtx = resizeCanvas.getContext('2d', { willReadFrequently: true });
     if (!rCtx) throw new Error('2D context unavailable for resize');
     const rgba = rCtx.getImageData(0, 0, size, size).data;
@@ -315,9 +312,25 @@ async function runServerRmbgInference(
       rgb[dst + 2] = rgba[p + 2];
     }
     const compressed = await compressRgbPayloadIfSupported(rgb);
-    uploadBlob = compressed.body;
-    contentType = 'application/octet-stream';
-    isGzipReq = compressed.isGzip;
+    return {
+      body: compressed.body,
+      contentType: 'application/octet-stream',
+      isGzipReq: compressed.isGzip,
+    };
+  };
+
+  // Encode 1024x1024 as lightweight ~80KB JPEG (20x smaller upload than raw RGB!)
+  let uploadBlob: Blob | null = await new Promise<Blob | null>((resolve) =>
+    resizeCanvas.toBlob((b) => resolve(b), 'image/jpeg', 0.93)
+  );
+  let contentType = 'image/jpeg';
+  let isGzipReq = false;
+
+  if (!uploadBlob) {
+    const raw = await buildRawPayload();
+    uploadBlob = raw.body;
+    contentType = raw.contentType;
+    isGzipReq = raw.isGzipReq;
   }
 
   let fakePct = 32;
@@ -336,17 +349,24 @@ async function runServerRmbgInference(
 
   try {
     onProgress?.('Detecting Main Subject...', 32);
-    const res = await fetch('/api/remove-background', {
-      method: 'POST',
-      headers: {
-        'Content-Type': contentType,
-        ...(isGzipReq ? { 'X-Payload-Encoding': 'gzip' } : {}),
-        'X-Accept-Mask-Finalized': '1',
-        ...(canDecompressGzip ? { 'X-Accept-Mask-Gzip': '1' } : {}),
-      },
-      body: uploadBlob,
-      signal: controller.signal,
-    });
+    const postMask = (body: Blob, ct: string, gzipReq: boolean) =>
+      fetch('/api/remove-background', {
+        method: 'POST',
+        headers: {
+          'Content-Type': ct,
+          ...(gzipReq ? { 'X-Payload-Encoding': 'gzip' } : {}),
+          'X-Accept-Mask-Finalized': '1',
+          ...(canDecompressGzip ? { 'X-Accept-Mask-Gzip': '1' } : {}),
+        },
+        body,
+        signal: controller.signal,
+      });
+
+    let res = await postMask(uploadBlob, contentType, isGzipReq);
+    if (res.status === 501 && contentType === 'image/jpeg') {
+      const raw = await buildRawPayload();
+      res = await postMask(raw.body, raw.contentType, raw.isGzipReq);
+    }
 
     if (!res.ok) {
       throw new Error(`Server cutout returned HTTP ${res.status}`);
