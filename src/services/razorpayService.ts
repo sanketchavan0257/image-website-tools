@@ -1,6 +1,12 @@
 import { PlanType, BillingCycle } from '../types';
 import { getEnvRazorpayKeyId } from '../config/env';
 import { UserProfile, AutoPayStatus } from '../types/auth';
+import {
+  convertUSDToCurrency,
+  getCurrencyConfig,
+  roundCurrencyAmount,
+  toRazorpayMinorUnits,
+} from '../config/currencies';
 
 export interface BillingCycleOption {
   id: BillingCycle;
@@ -62,6 +68,12 @@ export function calculatePlanExpiryDate(cycle: BillingCycle, fromDate: Date = ne
 }
 
 export interface CyclePriceInfo {
+  currency: string;
+  totalAmount: number;
+  originalAmount: number;
+  perMonthAmount: number;
+  savingsAmount: number;
+  // Aliases kept for backwards compatibility
   totalINR: number;
   originalINR: number;
   perMonthINR: number;
@@ -74,7 +86,7 @@ export interface PlanPricingItem {
   badge?: string;
   amountINR: number;
   amountUSD: number;
-  cycles: Record<BillingCycle, CyclePriceInfo>;
+  cycles: Record<BillingCycle, Omit<CyclePriceInfo, 'currency' | 'totalAmount' | 'originalAmount' | 'perMonthAmount' | 'savingsAmount'>>;
   batchLimit: string;
   fileLimit: string;
   perks: string[];
@@ -85,13 +97,13 @@ export const PLAN_PRICING: Record<'pro' | 'max' | 'ultra', PlanPricingItem> = {
     id: 'pro',
     name: 'PixiForge Pro',
     badge: 'Popular',
-    amountINR: 299,
+    amountINR: 9,
     amountUSD: 4.99,
     cycles: {
-      monthly: { totalINR: 299, originalINR: 299, perMonthINR: 299, savingsINR: 0 },
-      '3months': { totalINR: 799, originalINR: 897, perMonthINR: 266, savingsINR: 98 },
-      '6months': { totalINR: 1499, originalINR: 1794, perMonthINR: 250, savingsINR: 295 },
-      yearly: { totalINR: 2699, originalINR: 3588, perMonthINR: 225, savingsINR: 889 },
+      monthly: { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
+      '3months': { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
+      '6months': { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
+      yearly: { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
     },
     batchLimit: '100 images per batch',
     fileLimit: '100 MB per file',
@@ -108,13 +120,13 @@ export const PLAN_PRICING: Record<'pro' | 'max' | 'ultra', PlanPricingItem> = {
     id: 'max',
     name: 'PixiForge Max',
     badge: 'High Power',
-    amountINR: 599,
+    amountINR: 9,
     amountUSD: 9.99,
     cycles: {
-      monthly: { totalINR: 599, originalINR: 599, perMonthINR: 599, savingsINR: 0 },
-      '3months': { totalINR: 1599, originalINR: 1797, perMonthINR: 533, savingsINR: 198 },
-      '6months': { totalINR: 2999, originalINR: 3594, perMonthINR: 500, savingsINR: 595 },
-      yearly: { totalINR: 5399, originalINR: 7188, perMonthINR: 450, savingsINR: 1789 },
+      monthly: { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
+      '3months': { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
+      '6months': { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
+      yearly: { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
     },
     batchLimit: '300 images per batch',
     fileLimit: '250 MB per file',
@@ -131,13 +143,13 @@ export const PLAN_PRICING: Record<'pro' | 'max' | 'ultra', PlanPricingItem> = {
     id: 'ultra',
     name: 'PixiForge Ultra',
     badge: 'Ultimate Power',
-    amountINR: 1199,
+    amountINR: 9,
     amountUSD: 19.99,
     cycles: {
-      monthly: { totalINR: 1199, originalINR: 1199, perMonthINR: 1199, savingsINR: 0 },
-      '3months': { totalINR: 3199, originalINR: 3597, perMonthINR: 1066, savingsINR: 398 },
-      '6months': { totalINR: 5999, originalINR: 7194, perMonthINR: 1000, savingsINR: 1195 },
-      yearly: { totalINR: 10799, originalINR: 14388, perMonthINR: 900, savingsINR: 3589 },
+      monthly: { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
+      '3months': { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
+      '6months': { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
+      yearly: { totalINR: 9, originalINR: 9, perMonthINR: 9, savingsINR: 0 },
     },
     batchLimit: '1,000 images per batch',
     fileLimit: '1,000 MB (1 GB) per file',
@@ -152,8 +164,45 @@ export const PLAN_PRICING: Record<'pro' | 'max' | 'ultra', PlanPricingItem> = {
   },
 };
 
-export function getPlanCyclePrice(plan: 'pro' | 'max' | 'ultra', cycle: BillingCycle): CyclePriceInfo {
-  return PLAN_PRICING[plan].cycles[cycle] || PLAN_PRICING[plan].cycles.monthly;
+export function getPlanCyclePrice(
+  plan: 'pro' | 'max' | 'ultra',
+  cycle: BillingCycle,
+  currencyCode: string = 'INR'
+): CyclePriceInfo {
+  const cfg = getCurrencyConfig(currencyCode || 'INR');
+  if (cfg.code === 'INR') {
+    const inr = PLAN_PRICING[plan].cycles[cycle] || PLAN_PRICING[plan].cycles.monthly;
+    return {
+      currency: 'INR',
+      totalAmount: inr.totalINR,
+      originalAmount: inr.originalINR,
+      perMonthAmount: inr.perMonthINR,
+      savingsAmount: inr.savingsINR,
+      ...inr,
+    };
+  }
+
+  const cycleOpt = getBillingCycleOption(cycle);
+  const monthlyLocal = convertUSDToCurrency(PLAN_PRICING[plan].amountUSD, cfg.code);
+  const originalAmount = roundCurrencyAmount(monthlyLocal * cycleOpt.months, cfg.code);
+  const totalAmount = roundCurrencyAmount(
+    originalAmount * (1 - cycleOpt.discountPercent / 100),
+    cfg.code
+  );
+  const perMonthAmount = roundCurrencyAmount(totalAmount / cycleOpt.months, cfg.code);
+  const savingsAmount = roundCurrencyAmount(Math.max(0, originalAmount - totalAmount), cfg.code);
+
+  return {
+    currency: cfg.code,
+    totalAmount,
+    originalAmount,
+    perMonthAmount,
+    savingsAmount,
+    totalINR: totalAmount,
+    originalINR: originalAmount,
+    perMonthINR: perMonthAmount,
+    savingsINR: savingsAmount,
+  };
 }
 
 // Default fallback Razorpay Key ID (supports env var or stored user merchant key)
@@ -219,6 +268,7 @@ export interface AutoPayMeta {
 export interface DirectRazorpayOptions {
   plan: 'pro' | 'max' | 'ultra';
   billingCycle?: BillingCycle;
+  currency?: string;
   autoPay?: boolean;
   user: UserProfile | null;
   onSuccess: (
@@ -226,7 +276,8 @@ export interface DirectRazorpayOptions {
     plan: PlanType,
     amount: number,
     billingCycle: BillingCycle,
-    autoPayMeta: AutoPayMeta
+    autoPayMeta: AutoPayMeta,
+    currency: string
   ) => void;
   onFailure?: (errorMessage: string) => void;
   onDismiss?: () => void;
@@ -235,22 +286,29 @@ export interface DirectRazorpayOptions {
 export async function createOneTimeOrder(payload: {
   plan: 'pro' | 'max' | 'ultra';
   billingCycle: BillingCycle;
-  amountINR: number;
+  amount: number;
+  amountINR?: number;
+  currency?: string;
   userId?: string;
   userEmail?: string;
   userName?: string;
-}): Promise<{ orderId: string | null; keyId?: string; mode: string }> {
+}): Promise<{ orderId: string | null; keyId?: string; mode: string; warning?: string }> {
   try {
     const res = await fetch('/api/order/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        ...payload,
+        currency: payload.currency || 'INR',
+        amountINR: payload.amountINR ?? payload.amount,
+      }),
     });
     const data = await res.json();
     return {
       orderId: data?.orderId || null,
       keyId: data?.keyId || undefined,
       mode: data?.mode || 'client_direct_checkout',
+      warning: data?.warning,
     };
   } catch (err) {
     console.warn('One-time order init notice:', err);
@@ -287,7 +345,9 @@ export async function verifyRazorpayPayment(payload: {
 export async function createAutoPaySubscription(payload: {
   plan: 'pro' | 'max' | 'ultra';
   billingCycle: BillingCycle;
-  amountINR: number;
+  amount: number;
+  amountINR?: number;
+  currency?: string;
   userId?: string;
   userEmail?: string;
   userName?: string;
@@ -296,7 +356,11 @@ export async function createAutoPaySubscription(payload: {
     const res = await fetch('/api/subscription/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        ...payload,
+        currency: payload.currency || 'INR',
+        amountINR: payload.amountINR ?? payload.amount,
+      }),
     });
     const data = await res.json();
     return {
@@ -326,7 +390,7 @@ export async function cancelAutoPaySubscription(payload: {
       return {
         success: false,
         mode: data?.mode,
-        error: data?.error || 'There was a problem cancelling AutoPay.',
+        error: data?.error || 'AutoPay रद्द करताना अडचण आली.',
       };
     }
     return data;
@@ -361,13 +425,13 @@ export async function checkAutoPaySubscriptionStatus(subscriptionId: string): Pr
 }
 
 /**
- * Directly triggers the official Razorpay Checkout Popup.
- * Defaults to Standard One-Time Order Checkout (no AutoPay mandate/tokenization fees).
- * Only opens Razorpay Subscription (UPI AutoPay / Card e-Mandate) when explicitly opted in and amount >= ₹5.
+ * Directly triggers the official Razorpay Checkout Popup in the user's detected currency.
+ * Supports INR and all international Razorpay currencies (USD, GBP, CAD, EUR, AUD, JPY, etc.).
  */
 export async function openDirectRazorpayCheckout({
   plan,
   billingCycle = 'monthly',
+  currency = 'INR',
   autoPay = false,
   user,
   onSuccess,
@@ -377,8 +441,9 @@ export async function openDirectRazorpayCheckout({
   const planInfo = PLAN_PRICING[plan];
   if (!planInfo) return;
 
+  const currencyCfg = getCurrencyConfig(currency || 'INR');
   const cycleOpt = getBillingCycleOption(billingCycle);
-  const priceInfo = getPlanCyclePrice(plan, billingCycle);
+  const priceInfo = getPlanCyclePrice(plan, billingCycle, currencyCfg.code);
 
   const isLoaded = await loadRazorpayCheckoutScript();
   if (!isLoaded || !(window as any).Razorpay) {
@@ -397,7 +462,8 @@ export async function openDirectRazorpayCheckout({
     const subRes = await createAutoPaySubscription({
       plan: planInfo.id as 'pro' | 'max' | 'ultra',
       billingCycle,
-      amountINR: priceInfo.totalINR,
+      amount: priceInfo.totalAmount,
+      currency: currencyCfg.code,
       userId: user?.id,
       userEmail: user?.email,
       userName: user?.name,
@@ -405,7 +471,7 @@ export async function openDirectRazorpayCheckout({
     createdSubId = subRes.subscriptionId;
     serverKeyId = subRes.keyId;
 
-    // If low-amount (< ₹5) guard triggered or no subscription created, fall back to safe One-Time Order
+    // If low-amount guard triggered or no subscription created, fall back to safe One-Time Order
     if (!createdSubId) {
       if (subRes.mode === 'low_amount_one_time_guard') {
         effectiveAutoPay = false;
@@ -413,7 +479,8 @@ export async function openDirectRazorpayCheckout({
       const orderRes = await createOneTimeOrder({
         plan: planInfo.id as 'pro' | 'max' | 'ultra',
         billingCycle,
-        amountINR: priceInfo.totalINR,
+        amount: priceInfo.totalAmount,
+        currency: currencyCfg.code,
         userId: user?.id,
         userEmail: user?.email,
         userName: user?.name,
@@ -425,7 +492,8 @@ export async function openDirectRazorpayCheckout({
     const orderRes = await createOneTimeOrder({
       plan: planInfo.id as 'pro' | 'max' | 'ultra',
       billingCycle,
-      amountINR: priceInfo.totalINR,
+      amount: priceInfo.totalAmount,
+      currency: currencyCfg.code,
       userId: user?.id,
       userEmail: user?.email,
       userName: user?.name,
@@ -438,7 +506,7 @@ export async function openDirectRazorpayCheckout({
 
   const options: Record<string, any> = {
     key: razorpayKey,
-    currency: 'INR',
+    currency: currencyCfg.code,
     name: 'PixiForge Image Studio',
     description: effectiveAutoPay
       ? `${planInfo.name} (${cycleOpt.label} • AutoPay)`
@@ -452,6 +520,7 @@ export async function openDirectRazorpayCheckout({
     notes: {
       plan: planInfo.id,
       billingCycle,
+      currency: currencyCfg.code,
       durationMonths: String(cycleOpt.months),
       autoPay: effectiveAutoPay ? 'enabled' : 'disabled',
       userId: user?.id || 'guest',
@@ -495,15 +564,22 @@ export async function openDirectRazorpayCheckout({
             autoPayEnabled: false,
             autoPayStatus: 'off',
           };
-      onSuccess(paymentId, planInfo.id, priceInfo.totalINR, billingCycle, autoPayMeta);
+      onSuccess(
+        paymentId,
+        planInfo.id,
+        priceInfo.totalAmount,
+        billingCycle,
+        autoPayMeta,
+        currencyCfg.code
+      );
     },
   };
 
   if (createdSubId) {
-    // Official Razorpay Subscription ID triggers UPI AutoPay / Card Recurring Mandate inside Checkout
+    // Official Razorpay Subscription ID triggers Recurring Mandate inside Checkout
     options.subscription_id = createdSubId;
   } else {
-    options.amount = priceInfo.totalINR * 100; // Amount in paise
+    options.amount = toRazorpayMinorUnits(priceInfo.totalAmount, currencyCfg.code);
     if (createdOrderId) {
       options.order_id = createdOrderId;
     }
@@ -520,16 +596,22 @@ export async function openDirectRazorpayCheckout({
   } catch (err: any) {
     console.error('Razorpay open error:', err);
     if (onFailure) {
-      onFailure(err?.message || 'An error occurred while opening Razorpay.');
+      onFailure(err?.message || 'Unable to open Razorpay Checkout.');
     }
   }
 }
 
 export interface ProRataRefundBreakdown {
-  paidAmountINR: number;
+  currency: string;
+  paidAmount: number;
   totalDays: number;
   daysUsed: number;
   remainingDays: number;
+  perDayRate: number;
+  usedAmount: number;
+  refundAmount: number;
+  // Backwards-compatible aliases
+  paidAmountINR: number;
   perDayRateINR: number;
   usedAmountINR: number;
   refundAmountINR: number;
@@ -538,18 +620,20 @@ export interface ProRataRefundBreakdown {
 const MS_PER_DAY = 1000 * 60 * 60 * 24;
 
 /**
- * Calculates exact pro-rata refund amount when a user cancels mid-cycle.
- * Example: ₹300 plan for 30 days = ₹10/day. If cancelled after 7 days:
- * Used = ₹70, Refundable to user's account = ₹230.
+ * Calculates exact decimal-safe pro-rata refund in ANY currency (USD cents, GBP pence, CAD, EUR, INR, JPY, etc.).
  */
 export function calculateProRataRefund(params: {
-  paidAmountINR: number;
+  paidAmount?: number;
+  paidAmountINR?: number;
+  currency?: string;
   billingCycle?: BillingCycle;
   startDate?: string;
   expiresAt?: string;
   cancelDate?: Date;
 }): ProRataRefundBreakdown {
-  const paidAmountINR = Math.max(0, Math.round(params.paidAmountINR || 0));
+  const currency = params.currency ? getCurrencyConfig(params.currency).code : 'INR';
+  const rawPaid = params.paidAmount ?? params.paidAmountINR ?? 0;
+  const paidAmount = roundCurrencyAmount(Math.max(0, Number(rawPaid) || 0), currency);
   const cycle = params.billingCycle || 'monthly';
   const defaultDays = getBillingCycleOption(cycle).months * 30;
   const now = params.cancelDate || new Date();
@@ -567,18 +651,26 @@ export function calculateProRataRefund(params: {
     : 0;
 
   const remainingDays = Math.max(0, totalDays - daysUsed);
-  const perDayRateINR = Number((paidAmountINR / totalDays).toFixed(2));
-  const usedAmountINR = Math.min(paidAmountINR, Math.round((paidAmountINR / totalDays) * daysUsed));
-  const refundAmountINR = Math.max(0, paidAmountINR - usedAmountINR);
+  const perDayRate = roundCurrencyAmount(paidAmount / totalDays, currency);
+  const usedAmount = Math.min(
+    paidAmount,
+    roundCurrencyAmount((paidAmount / totalDays) * daysUsed, currency)
+  );
+  const refundAmount = roundCurrencyAmount(Math.max(0, paidAmount - usedAmount), currency);
 
   return {
-    paidAmountINR,
+    currency,
+    paidAmount,
     totalDays,
     daysUsed,
     remainingDays,
-    perDayRateINR,
-    usedAmountINR,
-    refundAmountINR,
+    perDayRate,
+    usedAmount,
+    refundAmount,
+    paidAmountINR: paidAmount,
+    perDayRateINR: perDayRate,
+    usedAmountINR: usedAmount,
+    refundAmountINR: refundAmount,
   };
 }
 
@@ -587,6 +679,8 @@ export interface RefundApiResponse {
   mode?: 'razorpay_api' | 'pending_gateway_secret' | 'no_refund_needed' | 'razorpay_error';
   refundId?: string;
   status?: string;
+  currency?: string;
+  refundAmount?: number;
   refundAmountINR?: number;
   warning?: string;
   error?: string;
@@ -594,7 +688,9 @@ export interface RefundApiResponse {
 
 export async function requestProRataRefund(payload: {
   paymentId: string;
-  refundAmountINR: number;
+  refundAmount?: number;
+  refundAmountINR?: number;
+  currency?: string;
   plan: PlanType;
   billingCycle?: BillingCycle;
   userId?: string;
@@ -602,11 +698,18 @@ export async function requestProRataRefund(payload: {
   daysUsed: number;
   totalDays: number;
 }): Promise<RefundApiResponse> {
+  const finalAmount = payload.refundAmount ?? payload.refundAmountINR ?? 0;
+  const currency = payload.currency ? getCurrencyConfig(payload.currency).code : 'INR';
   try {
     const res = await fetch('/api/refund', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        ...payload,
+        refundAmount: finalAmount,
+        refundAmountINR: finalAmount,
+        currency,
+      }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -622,7 +725,7 @@ export async function requestProRataRefund(payload: {
     return {
       success: false,
       mode: 'razorpay_error',
-      error: 'Could not reach the server. Please try again.',
+      error: 'Unable to reach server for refund. Please try again.',
     };
   }
 }
