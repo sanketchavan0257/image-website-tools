@@ -6,13 +6,17 @@
   "scripts": {
     "dev": "tsx server.ts",
     "start": "NODE_ENV=production node server.ts",
-    "build": "node scripts/copy-ort.mjs && vite build",
+    "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "copy:ort": "node scripts/copy-ort.mjs",
+    "postinstall": "node scripts/copy-ort.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
+    "@imgly/background-removal": "^1.7.0",
+    "@mediapipe/tasks-vision": "^1.2.3",
     "@tailwindcss/vite": "^4.3.3",
     "@types/jszip": "^3.4.0",
     "@vitejs/plugin-react": "^6.1.1",
@@ -25,7 +29,8 @@
     "jszip": "^3.10.2",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
-    "onnxruntime-web": "^1.22.0",
+    "onnxruntime-node": "1.21.0",
+    "onnxruntime-web": "1.21.0",
     "pdfjs-dist": "^6.4.299",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
