@@ -1684,6 +1684,7 @@ async function startServer() {
           reject(new Error(`ffmpeg decode failed (code=${code}, bytes=${out.byteLength}): ${stderr}`));
         }
       });
+      proc.stdin.on('error', () => {});
       proc.stdin.write(imgBuf);
       proc.stdin.end();
     });
@@ -1885,7 +1886,10 @@ async function startServer() {
         if (isEncodedImage) {
           try {
             rgbBuf = await decodeImageBufferToRgb1024(rawBody);
-          } catch {
+          } catch (err: any) {
+            if (err?.code === 'ENOENT') {
+              return res.status(501).json({ error: 'Image decoder unavailable', code: 'NO_DECODER' });
+            }
             return res.status(400).json({ error: 'Invalid image payload' });
           }
         } else if (isGzip) {
