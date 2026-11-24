@@ -43,6 +43,7 @@ export const Header: React.FC<HeaderProps> = ({ currentPath, onNavigate }) => {
   const { user, openAuthModal, logout, setAuthModalTab, updateUserName } = useAuthStore();
   const isAdmin = isAdminUser(user);
   const [toolsDropdownOpen, setToolsDropdownOpen] = useState(false);
+  const [otherDropdownOpen, setOtherDropdownOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isLogoutConfirmOpen, setIsLogoutConfirmOpen] = useState(false);
@@ -92,22 +93,229 @@ export const Header: React.FC<HeaderProps> = ({ currentPath, onNavigate }) => {
     };
   }, [mobileMenuOpen]);
 
+  // Close any open header dropdown when clicking anywhere outside it or pressing Escape
+  useEffect(() => {
+    if (!toolsDropdownOpen && !otherDropdownOpen && !userMenuOpen) return;
+
+    const handlePointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (toolsDropdownOpen && !target?.closest('[data-header-dropdown="popular"]')) {
+        setToolsDropdownOpen(false);
+      }
+      if (otherDropdownOpen && !target?.closest('[data-header-dropdown="other"]')) {
+        setOtherDropdownOpen(false);
+      }
+      if (userMenuOpen && !target?.closest('[data-header-dropdown="profile"]')) {
+        setUserMenuOpen(false);
+        setIsEditingName(false);
+      }
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setToolsDropdownOpen(false);
+        setOtherDropdownOpen(false);
+        setUserMenuOpen(false);
+        setIsEditingName(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [toolsDropdownOpen, otherDropdownOpen, userMenuOpen]);
+
+  const renderProfileDropdown = (align: 'left' | 'right') => {
+    if (!user || !userMenuOpen) return null;
+    return (
+      <div
+        className={`absolute ${
+          align === 'left' ? 'left-0' : 'right-0'
+        } top-full mt-2 w-64 bg-white rounded-2xl shadow-xl border border-slate-100 p-2 z-50 animate-fade-in text-xs space-y-1`}
+      >
+          <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 space-y-1.5 mb-1">
+            {isEditingName ? (
+              <form onSubmit={handleSaveProfileName} className="space-y-1.5">
+                <label className="block text-[10px] font-bold text-slate-600">
+                  Display Name
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  required
+                  maxLength={100}
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  placeholder="e.g. Sanket Chavan"
+                  className="w-full px-2.5 py-1.5 bg-white border border-blue-300 rounded-lg text-xs font-semibold text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                />
+                <div className="flex items-center justify-end gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingName(false)}
+                    className="px-2 py-1 rounded-md text-[11px] font-semibold text-slate-600 hover:bg-slate-200 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSavingName || !nameDraft.trim()}
+                    className="px-2.5 py-1 rounded-md text-[11px] font-bold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 flex items-center gap-1 cursor-pointer"
+                  >
+                    <Check className="w-3 h-3" />
+                    <span>{isSavingName ? 'Saving...' : 'Save'}</span>
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="font-bold text-slate-900 text-sm truncate">{user.name}</span>
+                  <button
+                    type="button"
+                    title="Edit profile name"
+                    onClick={() => {
+                      setNameDraft(user.name || '');
+                      setIsEditingName(true);
+                    }}
+                    className="p-1 rounded-md text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors shrink-0 cursor-pointer"
+                  >
+                    <Pencil className="w-3 h-3" />
+                  </button>
+                </div>
+                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase shrink-0 ${
+                  currentPlan === 'ultra'
+                    ? 'bg-amber-100 text-amber-800'
+                    : currentPlan === 'max'
+                    ? 'bg-indigo-100 text-indigo-700'
+                    : currentPlan === 'pro'
+                    ? 'bg-blue-100 text-blue-700'
+                    : 'bg-slate-200 text-slate-700'
+                }`}>
+                  {currentPlan.toUpperCase()}
+                </span>
+              </div>
+            )}
+            <p className="text-[11px] text-slate-500 truncate">
+              {user.email || user.phone}
+            </p>
+            <span className="text-[10px] text-slate-400 block">
+              Auth via {user.authMethod === 'mobile' ? 'Mobile OTP' : 'Email'}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              setUserMenuOpen(false);
+              onNavigate('/forgot-password');
+            }}
+            className="w-full text-left p-2 rounded-xl hover:bg-slate-100 text-slate-700 transition-colors flex items-center gap-2 cursor-pointer font-medium"
+          >
+            <KeyRound className="w-4 h-4 text-slate-400" />
+            <span>Change Password</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setUserMenuOpen(false);
+              onNavigate('/pricing');
+            }}
+            className="w-full text-left p-2 rounded-xl hover:bg-slate-100 text-slate-700 transition-colors flex items-center gap-2 cursor-pointer font-medium"
+          >
+            <Sparkles className="w-4 h-4 text-indigo-600" />
+            <span>Upgrade / Plans</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setUserMenuOpen(false);
+              onNavigate('/billing');
+            }}
+            className="w-full text-left p-2 rounded-xl hover:bg-slate-100 text-slate-700 transition-colors flex items-center gap-2 cursor-pointer font-medium"
+          >
+            <Receipt className="w-4 h-4 text-blue-600" />
+            <span>Billing & Invoices</span>
+          </button>
+
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => {
+                setUserMenuOpen(false);
+                onNavigate('/admin');
+              }}
+              className="w-full text-left p-2 rounded-xl hover:bg-indigo-50 text-indigo-700 transition-colors flex items-center gap-2 cursor-pointer font-bold"
+            >
+              <Shield className="w-4 h-4 text-indigo-600" />
+              <span>Admin Panel</span>
+            </button>
+          )}
+
+          <div className="border-t border-slate-100 my-1" />
+
+          <button
+            type="button"
+            onClick={() => {
+              setUserMenuOpen(false);
+              setIsLogoutConfirmOpen(true);
+            }}
+            className="w-full text-left p-2 rounded-xl hover:bg-red-50 text-red-600 transition-colors flex items-center gap-2 cursor-pointer font-bold"
+          >
+            <LogOut className="w-4 h-4" />
+            <span>Log Out</span>
+          </button>
+        </div>
+    );
+  };
+
   return (
     <>
       <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200/80 text-slate-800">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
-        {/* Brand / Logo */}
-        <div
-          onClick={() => onNavigate('/')}
-          className="flex items-center gap-2.5 cursor-pointer select-none group shrink-0"
-        >
-          <div className="hidden lg:flex w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-violet-600 text-white items-center justify-center shadow-md shadow-blue-500/20 group-hover:scale-105 transition-transform">
-            <Layers className="w-5 h-5" />
-          </div>
-          <div>
-            <span className="font-display text-lg font-bold tracking-tight text-slate-900 group-hover:text-blue-600 transition-colors">
-              Pixi<span className="text-blue-600">Forge</span>
-            </span>
+        {/* Left: Mobile/Tablet Profile Icon (before PixiForge) + Brand / Logo */}
+        <div className="flex items-center gap-2.5 shrink-0">
+          {user && (
+            <div data-header-dropdown="profile" className="relative lg:hidden">
+              <button
+                type="button"
+                onClick={() => {
+                  setToolsDropdownOpen(false);
+                  setOtherDropdownOpen(false);
+                  setUserMenuOpen(!userMenuOpen);
+                }}
+                className="flex items-center transition-transform active:scale-95 cursor-pointer select-none"
+                aria-label="User account menu"
+              >
+                <div
+                  className={`w-8 h-8 rounded-full ${
+                    user.avatarColor || 'bg-blue-600'
+                  } text-white flex items-center justify-center font-bold text-xs shadow-xs hover:ring-2 hover:ring-blue-500/30 transition-all`}
+                >
+                  {user.name ? user.name.charAt(0).toUpperCase() : 'U'}
+                </div>
+              </button>
+              {renderProfileDropdown('left')}
+            </div>
+          )}
+
+          <div
+            onClick={() => onNavigate('/')}
+            className="flex items-center gap-2.5 cursor-pointer select-none group shrink-0"
+          >
+            <div className="hidden lg:flex w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-violet-600 text-white items-center justify-center shadow-md shadow-blue-500/20 group-hover:scale-105 transition-transform">
+              <Layers className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="font-display text-lg font-bold tracking-tight text-slate-900 group-hover:text-blue-600 transition-colors">
+                Pixi<span className="text-blue-600">Forge</span>
+              </span>
+            </div>
           </div>
         </div>
 
@@ -123,9 +331,14 @@ export const Header: React.FC<HeaderProps> = ({ currentPath, onNavigate }) => {
           </button>
 
           {/* Tools Mega Dropdown */}
-          <div className="relative">
+          <div data-header-dropdown="popular" className="relative">
             <button
-              onClick={() => setToolsDropdownOpen(!toolsDropdownOpen)}
+              type="button"
+              onClick={() => {
+                setOtherDropdownOpen(false);
+                setUserMenuOpen(false);
+                setToolsDropdownOpen(!toolsDropdownOpen);
+              }}
               className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl whitespace-nowrap hover:text-slate-900 hover:bg-slate-50 transition-colors cursor-pointer"
             >
               <span>Popular</span>
@@ -133,37 +346,31 @@ export const Header: React.FC<HeaderProps> = ({ currentPath, onNavigate }) => {
             </button>
 
             {toolsDropdownOpen && (
-              <>
-                <div
-                  className="fixed inset-0 z-20"
-                  onClick={() => setToolsDropdownOpen(false)}
-                />
-                <div className="absolute top-full left-0 mt-2 w-72 bg-white rounded-2xl shadow-xl border border-slate-100 p-2 z-30 animate-fade-in text-xs">
-                  <div className="px-3 py-1.5 font-bold uppercase tracking-wider text-slate-400 text-[10px]">
-                    Phase 1 Ready Tools
-                  </div>
-                  {[
-                    { name: 'Image Resizer', path: '/image-resizer', desc: 'Pixels, %, social media' },
-                    { name: 'Image Compressor', path: '/image-compressor', desc: 'Target KB/MB or presets' },
-                    { name: 'Image Cropper', path: '/image-cropper', desc: '1:1, 16:9, free crop' },
-                    { name: 'JPG to PNG', path: '/jpg-to-png', desc: 'Lossless PNG converter' },
-                    { name: 'PNG to JPG', path: '/png-to-jpg', desc: 'With transparency background' },
-                    { name: 'WebP Converter', path: '/webp-converter', desc: 'Modern next-gen WebP' },
-                  ].map((t) => (
-                    <button
-                      key={t.path}
-                      onClick={() => {
-                        onNavigate(t.path);
-                        setToolsDropdownOpen(false);
-                      }}
-                      className="w-full text-left p-2 rounded-xl hover:bg-blue-50/70 hover:text-blue-700 transition-colors flex flex-col cursor-pointer"
-                    >
-                      <span className="font-semibold text-slate-800">{t.name}</span>
-                      <span className="text-[10px] text-slate-400">{t.desc}</span>
-                    </button>
-                  ))}
+              <div className="absolute top-full left-0 mt-2 w-72 bg-white rounded-2xl shadow-xl border border-slate-100 p-2 z-50 animate-fade-in text-xs">
+                <div className="px-3 py-1.5 font-bold uppercase tracking-wider text-slate-400 text-[10px]">
+                  Phase 1 Ready Tools
                 </div>
-              </>
+                {[
+                  { name: 'Image Resizer', path: '/image-resizer', desc: 'Pixels, %, social media' },
+                  { name: 'Image Compressor', path: '/image-compressor', desc: 'Target KB/MB or presets' },
+                  { name: 'Image Cropper', path: '/image-cropper', desc: '1:1, 16:9, free crop' },
+                  { name: 'JPG to PNG', path: '/jpg-to-png', desc: 'Lossless PNG converter' },
+                  { name: 'PNG to JPG', path: '/png-to-jpg', desc: 'With transparency background' },
+                  { name: 'WebP Converter', path: '/webp-converter', desc: 'Modern next-gen WebP' },
+                ].map((t) => (
+                  <button
+                    key={t.path}
+                    onClick={() => {
+                      onNavigate(t.path);
+                      setToolsDropdownOpen(false);
+                    }}
+                    className="w-full text-left p-2 rounded-xl hover:bg-blue-50/70 hover:text-blue-700 transition-colors flex flex-col cursor-pointer"
+                  >
+                    <span className="font-semibold text-slate-800">{t.name}</span>
+                    <span className="text-[10px] text-slate-400">{t.desc}</span>
+                  </button>
+                ))}
+              </div>
             )}
           </div>
 
@@ -185,14 +392,64 @@ export const Header: React.FC<HeaderProps> = ({ currentPath, onNavigate }) => {
             Billing
           </button>
 
+          {/* Desktop Help link */}
           <button
             onClick={() => onNavigate('/help')}
-            className={`px-3.5 py-2 rounded-xl whitespace-nowrap transition-colors cursor-pointer ${
+            className={`hidden lg:inline-flex px-3.5 py-2 rounded-xl whitespace-nowrap transition-colors cursor-pointer ${
               currentPath === '/help' ? 'text-blue-600 font-semibold bg-blue-50' : 'hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
             Help
           </button>
+
+          {/* Tablet-only Other Dropdown (replaces Help on md..lg viewports only) */}
+          <div data-header-dropdown="other" className="relative lg:hidden">
+            <button
+              type="button"
+              onClick={() => {
+                setToolsDropdownOpen(false);
+                setUserMenuOpen(false);
+                setOtherDropdownOpen(!otherDropdownOpen);
+              }}
+              className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl whitespace-nowrap transition-colors cursor-pointer ${
+                ['/help', '/terms', '/privacy-policy', '/refund-policy', '/shipping-policy'].includes(currentPath)
+                  ? 'text-blue-600 font-semibold bg-blue-50'
+                  : 'hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              <span>Other</span>
+              <ChevronDown className="w-4 h-4 text-slate-400" />
+            </button>
+
+            {otherDropdownOpen && (
+              <div className="absolute top-full right-0 mt-2 w-64 bg-white rounded-2xl shadow-xl border border-slate-100 p-2 z-50 animate-fade-in text-xs space-y-0.5">
+                {[
+                  { name: 'Help & Support', path: '/help' },
+                  { name: 'Terms & Conditions', path: '/terms' },
+                  { name: 'Privacy Policy', path: '/privacy-policy' },
+                  { name: 'Refund & Cancellation Policy', path: '/refund-policy' },
+                  { name: 'Shipping / Delivery Policy', path: '/shipping-policy' },
+                ].map((item) => (
+                  <button
+                    key={item.path}
+                    type="button"
+                    onClick={() => {
+                      onNavigate(item.path);
+                      setOtherDropdownOpen(false);
+                    }}
+                    className={`w-full text-left px-3 py-2.5 rounded-xl transition-colors flex items-center justify-between cursor-pointer font-semibold ${
+                      currentPath === item.path
+                        ? 'bg-blue-50 text-blue-700'
+                        : 'text-slate-700 hover:bg-blue-50/70 hover:text-blue-700'
+                    }`}
+                  >
+                    <span>{item.name}</span>
+                    <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
           {isAdmin && (
             <button
@@ -262,12 +519,16 @@ export const Header: React.FC<HeaderProps> = ({ currentPath, onNavigate }) => {
 
           {/* User Auth Section */}
           {user ? (
-            /* Logged In User Dropdown */
-            <div className="relative">
+            /* Logged In User Dropdown (Desktop right side; shown before PixiForge on mobile & tablet) */
+            <div data-header-dropdown="profile" className="relative hidden lg:block">
               <button
                 type="button"
-                onClick={() => setUserMenuOpen(!userMenuOpen)}
-                className="flex items-center gap-2 transition-transform active:scale-95 cursor-pointer select-none"
+                onClick={() => {
+                  setToolsDropdownOpen(false);
+                  setOtherDropdownOpen(false);
+                  setUserMenuOpen(!userMenuOpen);
+                }}
+                className="flex items-center transition-transform active:scale-95 cursor-pointer select-none"
                 aria-label="User account menu"
               >
                 <div
@@ -277,158 +538,8 @@ export const Header: React.FC<HeaderProps> = ({ currentPath, onNavigate }) => {
                 >
                   {user.name ? user.name.charAt(0).toUpperCase() : 'U'}
                 </div>
-                <span className="inline max-w-[140px] sm:max-w-[220px] truncate text-xs font-semibold text-slate-800 hover:text-blue-600 transition-colors">
-                  {user.name}
-                </span>
               </button>
-
-              {userMenuOpen && (
-                <>
-                  <div
-                    className="fixed inset-0 z-20"
-                    onClick={() => {
-                      setUserMenuOpen(false);
-                      setIsEditingName(false);
-                    }}
-                  />
-                  <div className="absolute right-0 top-full mt-2 w-64 bg-white rounded-2xl shadow-xl border border-slate-100 p-2 z-30 animate-fade-in text-xs space-y-1">
-                    <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 space-y-1.5 mb-1">
-                      {isEditingName ? (
-                        <form onSubmit={handleSaveProfileName} className="space-y-1.5">
-                          <label className="block text-[10px] font-bold text-slate-600">
-                            Display Name
-                          </label>
-                          <input
-                            type="text"
-                            autoFocus
-                            required
-                            maxLength={100}
-                            value={nameDraft}
-                            onChange={(e) => setNameDraft(e.target.value)}
-                            placeholder="e.g. Sanket Chavan"
-                            className="w-full px-2.5 py-1.5 bg-white border border-blue-300 rounded-lg text-xs font-semibold text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
-                          />
-                          <div className="flex items-center justify-end gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => setIsEditingName(false)}
-                              className="px-2 py-1 rounded-md text-[11px] font-semibold text-slate-600 hover:bg-slate-200 cursor-pointer"
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              type="submit"
-                              disabled={isSavingName || !nameDraft.trim()}
-                              className="px-2.5 py-1 rounded-md text-[11px] font-bold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 flex items-center gap-1 cursor-pointer"
-                            >
-                              <Check className="w-3 h-3" />
-                              <span>{isSavingName ? 'Saving...' : 'Save'}</span>
-                            </button>
-                          </div>
-                        </form>
-                      ) : (
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-1.5 min-w-0">
-                            <span className="font-bold text-slate-900 text-sm truncate">{user.name}</span>
-                            <button
-                              type="button"
-                              title="Edit profile name"
-                              onClick={() => {
-                                setNameDraft(user.name || '');
-                                setIsEditingName(true);
-                              }}
-                              className="p-1 rounded-md text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors shrink-0 cursor-pointer"
-                            >
-                              <Pencil className="w-3 h-3" />
-                            </button>
-                          </div>
-                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase shrink-0 ${
-                            currentPlan === 'ultra'
-                              ? 'bg-amber-100 text-amber-800'
-                              : currentPlan === 'max'
-                              ? 'bg-indigo-100 text-indigo-700'
-                              : currentPlan === 'pro'
-                              ? 'bg-blue-100 text-blue-700'
-                              : 'bg-slate-200 text-slate-700'
-                          }`}>
-                            {currentPlan.toUpperCase()}
-                          </span>
-                        </div>
-                      )}
-                      <p className="text-[11px] text-slate-500 truncate">
-                        {user.email || user.phone}
-                      </p>
-                      <span className="text-[10px] text-slate-400 block">
-                        Auth via {user.authMethod === 'mobile' ? 'Mobile OTP' : 'Email'}
-                      </span>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setUserMenuOpen(false);
-                        onNavigate('/forgot-password');
-                      }}
-                      className="w-full text-left p-2 rounded-xl hover:bg-slate-100 text-slate-700 transition-colors flex items-center gap-2 cursor-pointer font-medium"
-                    >
-                      <KeyRound className="w-4 h-4 text-slate-400" />
-                      <span>Change Password</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setUserMenuOpen(false);
-                        onNavigate('/pricing');
-                      }}
-                      className="w-full text-left p-2 rounded-xl hover:bg-slate-100 text-slate-700 transition-colors flex items-center gap-2 cursor-pointer font-medium"
-                    >
-                      <Sparkles className="w-4 h-4 text-indigo-600" />
-                      <span>Upgrade / Plans</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setUserMenuOpen(false);
-                        onNavigate('/billing');
-                      }}
-                      className="w-full text-left p-2 rounded-xl hover:bg-slate-100 text-slate-700 transition-colors flex items-center gap-2 cursor-pointer font-medium"
-                    >
-                      <Receipt className="w-4 h-4 text-blue-600" />
-                      <span>Billing & Invoices</span>
-                    </button>
-
-                    {isAdmin && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setUserMenuOpen(false);
-                          onNavigate('/admin');
-                        }}
-                        className="w-full text-left p-2 rounded-xl hover:bg-indigo-50 text-indigo-700 transition-colors flex items-center gap-2 cursor-pointer font-bold"
-                      >
-                        <Shield className="w-4 h-4 text-indigo-600" />
-                        <span>Admin Panel</span>
-                      </button>
-                    )}
-
-                    <div className="border-t border-slate-100 my-1" />
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setUserMenuOpen(false);
-                        setIsLogoutConfirmOpen(true);
-                      }}
-                      className="w-full text-left p-2 rounded-xl hover:bg-red-50 text-red-600 transition-colors flex items-center gap-2 cursor-pointer font-bold"
-                    >
-                      <LogOut className="w-4 h-4" />
-                      <span>Log Out</span>
-                    </button>
-                  </div>
-                </>
-              )}
+              {renderProfileDropdown('right')}
             </div>
           ) : (
             /* Free / Guest: Modern Animated Brand Blue Log In Button (Icon-Free, Glow-Free) */
