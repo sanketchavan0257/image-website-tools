@@ -10,6 +10,7 @@ import { PricingView } from './views/PricingView';
 import { BillingView } from './views/BillingView';
 import { AdminView } from './views/AdminView';
 import { HelpView } from './views/HelpView';
+import { PolicyView } from './views/PolicyView';
 import { PlanLimitModal } from './components/common/PlanLimitModal';
 import { AuthModal } from './components/auth/AuthModal';
 import { AuthView } from './views/AuthView';
@@ -325,6 +326,14 @@ export default function App() {
 
         {currentPath === '/help' && <HelpView onNavigate={navigate} />}
 
+        {currentPath === '/terms' && <PolicyView policy="terms" onNavigate={navigate} />}
+
+        {currentPath === '/privacy-policy' && <PolicyView policy="privacy" onNavigate={navigate} />}
+
+        {currentPath === '/refund-policy' && <PolicyView policy="refund" onNavigate={navigate} />}
+
+        {currentPath === '/shipping-policy' && <PolicyView policy="shipping" onNavigate={navigate} />}
+
         {currentPath === '/login' && <AuthView initialTab="login" onNavigate={navigate} />}
 
         {currentPath === '/signup' && <AuthView initialTab="signup" onNavigate={navigate} />}
@@ -349,6 +358,10 @@ export default function App() {
           currentPath !== '/billing' &&
           currentPath !== '/admin' &&
           currentPath !== '/help' &&
+          currentPath !== '/terms' &&
+          currentPath !== '/privacy-policy' &&
+          currentPath !== '/refund-policy' &&
+          currentPath !== '/shipping-policy' &&
           currentPath !== '/login' &&
           currentPath !== '/signup' &&
           currentPath !== '/forgot-password' && (
