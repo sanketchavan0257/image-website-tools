@@ -14,6 +14,7 @@ import {
   AlertCircle,
   Calendar,
   ArrowLeft,
+  Globe,
 } from 'lucide-react';
 import {
   BILLING_CYCLES,
@@ -21,6 +22,16 @@ import {
   getPlanCyclePrice,
   openDirectRazorpayCheckout,
 } from '../services/razorpayService';
+import {
+  COUNTRY_LABELS,
+  DetectedLocaleCurrency,
+  POPULAR_CURRENCY_OPTIONS,
+  SESSION_KEY_MANUAL_CURRENCY,
+  detectInstantCurrencyAndCountry,
+  fetchServerAutoCurrency,
+  formatCurrency,
+  getCurrencyConfig,
+} from '../config/currencies';
 import { PaymentSuccessModal } from '../components/pricing/PaymentSuccessModal';
 
 interface PricingViewProps {
@@ -32,9 +43,14 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
   const { user, updateUserPlan } = useAuthStore();
   const currentPlan = activePlan || 'free';
 
+  // Auto-detected country & local currency (zero-flicker instant sync + IP geo confirmation)
+  const [localeCurrency, setLocaleCurrency] = useState<DetectedLocaleCurrency>(() =>
+    detectInstantCurrencyAndCountry()
+  );
+
   // Selected billing cycle (Monthly, 3 Months, 6 Months, Yearly)
   const [billingCycle, setBillingCycle] = useState<BillingCycle>('monthly');
-  // AutoPay (Auto-Renewal) enabled by default on ₹9+ plans (charges first cycle now + sets up AutoPay for next cycle)
+  // AutoPay (Auto-Renewal) enabled by default
   const [autoPayEnabled, setAutoPayEnabled] = useState<boolean>(true);
 
   // Loading state while launching official Razorpay popup
@@ -48,12 +64,49 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
     billingCycle: BillingCycle;
     autoPayEnabled: boolean;
     amount: number;
+    currency: string;
   } | null>(null);
 
+  // Verify visitor's country IP silently in background unless manually overridden
+  useEffect(() => {
+    let active = true;
+    fetchServerAutoCurrency().then((detected) => {
+      if (active && detected) {
+        setLocaleCurrency(detected);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const activeCurrencyCode = localeCurrency.currencyCode;
+  const activeCurrencyCfg = getCurrencyConfig(activeCurrencyCode);
+  const activeCountryFlag = COUNTRY_LABELS[localeCurrency.countryCode]?.flag || '🌍';
+
+  const handleManualCurrencyChange = (currencyCode: string) => {
+    const chosen = POPULAR_CURRENCY_OPTIONS.find((opt) => opt.currencyCode === currencyCode);
+    const cfg = getCurrencyConfig(currencyCode);
+    const updated: DetectedLocaleCurrency = {
+      countryCode: chosen?.countryCode || localeCurrency.countryCode,
+      countryName:
+        (chosen?.countryCode && COUNTRY_LABELS[chosen.countryCode]?.name) || cfg.name,
+      currencyCode: cfg.code,
+      symbol: cfg.symbol,
+      source: 'manual',
+    };
+    try {
+      sessionStorage.setItem(SESSION_KEY_MANUAL_CURRENCY, JSON.stringify(updated));
+    } catch {
+      // ignore
+    }
+    setLocaleCurrency(updated);
+  };
+
   const activeCycleOption = getBillingCycleOption(billingCycle);
-  const proPrice = getPlanCyclePrice('pro', billingCycle);
-  const maxPrice = getPlanCyclePrice('max', billingCycle);
-  const ultraPrice = getPlanCyclePrice('ultra', billingCycle);
+  const proPrice = getPlanCyclePrice('pro', billingCycle, activeCurrencyCode);
+  const maxPrice = getPlanCyclePrice('max', billingCycle, activeCurrencyCode);
+  const ultraPrice = getPlanCyclePrice('ultra', billingCycle, activeCurrencyCode);
 
   // If user completed login and returned with a pending membership plan, automatically launch Razorpay
   useEffect(() => {
@@ -61,19 +114,21 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
       try {
         const savedPlan = sessionStorage.getItem('pixiforge_pending_plan') as PlanType | null;
         const savedCycle = (sessionStorage.getItem('pixiforge_pending_cycle') as BillingCycle | null) || 'monthly';
+        const savedCurrency = sessionStorage.getItem('pixiforge_pending_currency') || undefined;
         const savedAutoPayRaw = sessionStorage.getItem('pixiforge_pending_autopay');
         const savedAutoPay = savedAutoPayRaw === null ? true : savedAutoPayRaw === 'true';
         if (savedPlan && savedPlan !== 'free') {
           sessionStorage.removeItem('pixiforge_pending_plan');
           sessionStorage.removeItem('pixiforge_pending_cycle');
+          sessionStorage.removeItem('pixiforge_pending_currency');
           sessionStorage.removeItem('pixiforge_pending_autopay');
           sessionStorage.removeItem('pixiforge_auth_redirect');
           setBillingCycle(savedCycle);
           setAutoPayEnabled(savedAutoPay);
           setToastMessage(`Welcome ${user.name || ''}! Proceeding to ${savedPlan.toUpperCase()} checkout...`);
-          handleSelectPlan(savedPlan, savedCycle, savedAutoPay);
+          handleSelectPlan(savedPlan, savedCycle, savedAutoPay, savedCurrency);
         }
-      } catch (e) {
+      } catch {
         // ignore
       }
     }
@@ -82,11 +137,13 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
   const handleSelectPlan = async (
     plan: PlanType,
     cycleOverride?: BillingCycle,
-    autoPayOverride?: boolean
+    autoPayOverride?: boolean,
+    currencyOverride?: string
   ) => {
     setErrorMessage(null);
     const chosenCycle = cycleOverride || billingCycle;
     const useAutoPay = typeof autoPayOverride === 'boolean' ? autoPayOverride : autoPayEnabled;
+    const chosenCurrency = currencyOverride || activeCurrencyCode;
 
     if (plan === 'free') {
       setPlan('free');
@@ -102,28 +159,32 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
       try {
         sessionStorage.setItem('pixiforge_pending_plan', plan);
         sessionStorage.setItem('pixiforge_pending_cycle', chosenCycle);
+        sessionStorage.setItem('pixiforge_pending_currency', chosenCurrency);
         sessionStorage.setItem('pixiforge_pending_autopay', String(useAutoPay));
         sessionStorage.setItem('pixiforge_auth_redirect', '/pricing');
-      } catch (e) {}
-      setToastMessage('Please log in to get a membership.');
+      } catch {
+        // ignore
+      }
+      setToastMessage('मेंबरशिप घेण्यासाठी कृपया लॉगिन करा.');
       onNavigate('/login?redirect=/pricing');
       return;
     }
 
-    // Launch Official Razorpay Checkout (Standard One-Time Order by default, or AutoPay Subscription if opted in)
     setLoadingPlan(plan);
 
     await openDirectRazorpayCheckout({
       plan,
       billingCycle: chosenCycle,
+      currency: chosenCurrency,
       autoPay: useAutoPay,
       user,
-      onSuccess: (paymentId, paidPlan, amount, paidCycle, autoPayMeta) => {
+      onSuccess: (paymentId, paidPlan, amount, paidCycle, autoPayMeta, paidCurrency) => {
         setLoadingPlan(null);
         setPlan(paidPlan);
         updateUserPlan(paidPlan, {
           paymentId,
           amount,
+          currency: paidCurrency,
           billingCycle: paidCycle,
           autoPayEnabled: autoPayMeta.autoPayEnabled,
           autoPayStatus: autoPayMeta.autoPayStatus,
@@ -135,11 +196,12 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
           billingCycle: paidCycle,
           autoPayEnabled: autoPayMeta.autoPayEnabled,
           amount,
+          currency: paidCurrency,
         });
       },
       onFailure: (err) => {
         setLoadingPlan(null);
-        setErrorMessage(err || 'The payment could not be completed.');
+        setErrorMessage(err || 'Payment process could not be completed. Please try again.');
       },
       onDismiss: () => {
         setLoadingPlan(null);
@@ -149,8 +211,8 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
 
   return (
     <div className="w-full pb-16">
-      {/* Top-Left Back Button */}
-      <div className="w-full px-3 sm:px-5 pt-2 pb-7">
+      {/* Top-Left Back Button + Auto-Detected Currency Selector */}
+      <div className="w-full px-3 sm:px-5 pt-2 pb-7 flex items-center justify-between gap-3 flex-wrap">
         <button
           type="button"
           onClick={() => onNavigate('/')}
@@ -159,6 +221,32 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
           <ArrowLeft className="w-4 h-4 text-slate-500 group-hover:text-blue-600 group-hover:-translate-x-0.5 transition-all" />
           <span>Back to Home</span>
         </button>
+
+        {/* Auto-detected visitor currency pill with clean dropdown switcher */}
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white border border-slate-200/90 shadow-2xs text-xs">
+          <Globe className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+          <span className="text-[11px] font-semibold text-slate-500 hidden sm:inline">
+            {localeCurrency.source === 'manual' ? 'Currency:' : 'Auto:'}
+          </span>
+          <span aria-hidden="true">{activeCountryFlag}</span>
+          <select
+            aria-label="Select display currency"
+            value={activeCurrencyCode}
+            onChange={(e) => handleManualCurrencyChange(e.target.value)}
+            className="bg-transparent font-extrabold text-slate-800 text-xs focus:outline-hidden cursor-pointer pr-1"
+          >
+            {!POPULAR_CURRENCY_OPTIONS.some((o) => o.currencyCode === activeCurrencyCode) && (
+              <option value={activeCurrencyCode}>
+                {localeCurrency.countryName} ({activeCurrencyCode} {activeCurrencyCfg.symbol.trim()})
+              </option>
+            )}
+            {POPULAR_CURRENCY_OPTIONS.map((opt) => (
+              <option key={opt.currencyCode} value={opt.currencyCode}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-3 space-y-10">
@@ -180,22 +268,25 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
           <div className="pt-2 flex justify-center">
             <div className="inline-flex flex-wrap items-center justify-center gap-2 px-4 py-2 rounded-2xl bg-amber-50 border border-amber-200/90 text-amber-900 text-xs font-medium shadow-2xs">
               <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-              <span>You need to be logged in to buy a membership.</span>
+              <span>मेंबरशिप खरेदी करण्यासाठी लॉगिन असणे आवश्यक आहे.</span>
               <button
                 type="button"
                 onClick={() => {
                   try {
                     sessionStorage.setItem('pixiforge_auth_redirect', '/pricing');
-                  } catch (e) {}
+                  } catch {
+                    // ignore
+                  }
                   onNavigate('/login?redirect=/pricing');
                 }}
                 className="text-blue-700 hover:text-blue-900 font-bold underline cursor-pointer ml-1"
               >
-                Log in here
+                येथे लॉगिन करा
               </button>
             </div>
           </div>
         )}
+
         {/* Top Billing Duration Selector Bar (Monthly / 3 Months / 6 Months / Yearly) */}
         <div className="pt-5 flex flex-col items-center gap-2">
           <div
@@ -256,9 +347,9 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
                 One-Time Payment
               </button>
             </div>
-            {autoPayEnabled && proPrice.totalINR < 5 && (
+            {autoPayEnabled && proPrice.totalAmount < activeCurrencyCfg.minAutoPayAmount && (
               <p className="text-[11px] font-medium text-amber-700 max-w-md">
-                For amounts below ₹5 (e.g. ₹1), Razorpay AutoPay mandate fees are deducted from the merchant account, so a one-time order will be used for safety.
+                Minimum {formatCurrency(activeCurrencyCfg.minAutoPayAmount, activeCurrencyCode)} is required for AutoPay Mandate; One-Time Order will be used automatically.
               </p>
             )}
           </div>
@@ -300,7 +391,9 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
               </span>
             </div>
             <div className="mb-4">
-              <span className="text-3xl font-black text-slate-900">₹0</span>
+              <span className="text-3xl font-black text-slate-900">
+                {formatCurrency(0, activeCurrencyCode)}
+              </span>
               <span className="text-slate-500 text-xs ml-1">/ forever</span>
             </div>
             <p className="text-xs text-slate-600 mb-5 min-h-[32px]">
@@ -366,18 +459,18 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
             <div className="mb-4">
               <div className="flex items-baseline gap-1.5 flex-wrap">
                 <span className="text-3xl font-black text-slate-900">
-                  ₹{proPrice.totalINR.toLocaleString('en-IN')}
+                  {formatCurrency(proPrice.totalAmount, activeCurrencyCode)}
                 </span>
                 <span className="text-slate-500 text-xs">{activeCycleOption.unitLabel}</span>
-                {proPrice.savingsINR > 0 && (
+                {proPrice.savingsAmount > 0 && (
                   <span className="text-xs text-slate-400 line-through ml-1">
-                    ₹{proPrice.originalINR.toLocaleString('en-IN')}
+                    {formatCurrency(proPrice.originalAmount, activeCurrencyCode)}
                   </span>
                 )}
               </div>
-              {proPrice.savingsINR > 0 && (
+              {proPrice.savingsAmount > 0 && (
                 <div className="mt-1 text-[11px] font-bold text-emerald-700">
-                  ₹{proPrice.perMonthINR}/mo • Save ₹{proPrice.savingsINR.toLocaleString('en-IN')}
+                  {formatCurrency(proPrice.perMonthAmount, activeCurrencyCode)}/mo • Save {formatCurrency(proPrice.savingsAmount, activeCurrencyCode)}
                 </div>
               )}
             </div>
@@ -427,7 +520,7 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
             <span>
               {currentPlan === 'pro'
                 ? 'Active Plan'
-                : `Upgrade to Pro — ₹${proPrice.totalINR.toLocaleString('en-IN')}`}
+                : `Upgrade to Pro — ${formatCurrency(proPrice.totalAmount, activeCurrencyCode)}`}
             </span>
           </button>
         </div>
@@ -454,18 +547,18 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
             <div className="mb-4">
               <div className="flex items-baseline gap-1.5 flex-wrap">
                 <span className="text-3xl font-black text-slate-900">
-                  ₹{maxPrice.totalINR.toLocaleString('en-IN')}
+                  {formatCurrency(maxPrice.totalAmount, activeCurrencyCode)}
                 </span>
                 <span className="text-slate-500 text-xs">{activeCycleOption.unitLabel}</span>
-                {maxPrice.savingsINR > 0 && (
+                {maxPrice.savingsAmount > 0 && (
                   <span className="text-xs text-slate-400 line-through ml-1">
-                    ₹{maxPrice.originalINR.toLocaleString('en-IN')}
+                    {formatCurrency(maxPrice.originalAmount, activeCurrencyCode)}
                   </span>
                 )}
               </div>
-              {maxPrice.savingsINR > 0 && (
+              {maxPrice.savingsAmount > 0 && (
                 <div className="mt-1 text-[11px] font-bold text-emerald-700">
-                  ₹{maxPrice.perMonthINR}/mo • Save ₹{maxPrice.savingsINR.toLocaleString('en-IN')}
+                  {formatCurrency(maxPrice.perMonthAmount, activeCurrencyCode)}/mo • Save {formatCurrency(maxPrice.savingsAmount, activeCurrencyCode)}
                 </div>
               )}
             </div>
@@ -515,12 +608,12 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
             <span>
               {currentPlan === 'max'
                 ? 'Active Plan'
-                : `Upgrade to Max — ₹${maxPrice.totalINR.toLocaleString('en-IN')}`}
+                : `Upgrade to Max — ${formatCurrency(maxPrice.totalAmount, activeCurrencyCode)}`}
             </span>
           </button>
         </div>
 
-        {/* 4. Ultra Plan (Modern White with Purple Top-Left Accent) */}
+        {/* 4. Ultra Plan */}
         <div
           className={`p-6 rounded-3xl border flex flex-col justify-between transition-all relative bg-[radial-gradient(ellipse_at_top_left,_rgba(216,180,254,0.85)_0%,_rgba(243,232,255,0.45)_28%,_#ffffff_35%,_#ffffff_100%)] ${
             currentPlan === 'ultra'
@@ -542,18 +635,18 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
             <div className="mb-4">
               <div className="flex items-baseline gap-1.5 flex-wrap">
                 <span className="text-3xl font-black text-slate-900">
-                  ₹{ultraPrice.totalINR.toLocaleString('en-IN')}
+                  {formatCurrency(ultraPrice.totalAmount, activeCurrencyCode)}
                 </span>
                 <span className="text-slate-500 text-xs">{activeCycleOption.unitLabel}</span>
-                {ultraPrice.savingsINR > 0 && (
+                {ultraPrice.savingsAmount > 0 && (
                   <span className="text-xs text-slate-400 line-through ml-1">
-                    ₹{ultraPrice.originalINR.toLocaleString('en-IN')}
+                    {formatCurrency(ultraPrice.originalAmount, activeCurrencyCode)}
                   </span>
                 )}
               </div>
-              {ultraPrice.savingsINR > 0 && (
+              {ultraPrice.savingsAmount > 0 && (
                 <div className="mt-1 text-[11px] font-bold text-emerald-700">
-                  ₹{ultraPrice.perMonthINR}/mo • Save ₹{ultraPrice.savingsINR.toLocaleString('en-IN')}
+                  {formatCurrency(ultraPrice.perMonthAmount, activeCurrencyCode)}/mo • Save {formatCurrency(ultraPrice.savingsAmount, activeCurrencyCode)}
                 </div>
               )}
             </div>
@@ -603,7 +696,7 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
             <span>
               {currentPlan === 'ultra'
                 ? 'Active Plan'
-                : `Upgrade to Ultra — ₹${ultraPrice.totalINR.toLocaleString('en-IN')}`}
+                : `Upgrade to Ultra — ${formatCurrency(ultraPrice.totalAmount, activeCurrencyCode)}`}
             </span>
           </button>
         </div>
@@ -612,29 +705,35 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
       {/* Payment Security Badge */}
       <div className="bg-slate-50 border border-slate-200/80 rounded-3xl p-6 sm:p-7 flex flex-col md:flex-row items-center justify-between gap-6 text-slate-700">
         <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-2xl bg-blue-600 text-white font-black text-xl flex items-center justify-center shrink-0 shadow-md shadow-blue-500/25">
-            ₹
+          <div className="w-12 h-12 rounded-2xl bg-blue-600 text-white font-black text-base flex items-center justify-center shrink-0 shadow-md shadow-blue-500/25">
+            {activeCurrencyCfg.symbol.trim()}
           </div>
           <div>
-            <h4 className="font-extrabold text-slate-900 text-base">Direct Razorpay Official Checkout</h4>
+            <h4 className="font-extrabold text-slate-900 text-base">
+              Global Razorpay Checkout ({activeCurrencyCode})
+            </h4>
             <p className="text-xs text-slate-500 mt-0.5">
-              Secure payments go directly to your configured Razorpay Merchant Account via UPI (GPay, PhonePe, Paytm), Cards & NetBanking.
+              {activeCurrencyCode === 'INR'
+                ? 'Secure payments go directly to your Razorpay Merchant Account via UPI (GPay, PhonePe, Paytm), Cards & NetBanking.'
+                : `Automatically localized for ${localeCurrency.countryName} (${activeCurrencyCode}). Pay securely with International Visa, Mastercard, Amex & Wallets — with full pro-rata refund support.`}
             </p>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 text-xs font-semibold text-slate-600">
-          <span className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white border border-slate-200 shadow-2xs">
-            <QrCode className="w-3.5 h-3.5 text-blue-600" />
-            <span>UPI (GPay / PhonePe)</span>
-          </span>
+          {activeCurrencyCode === 'INR' && (
+            <span className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white border border-slate-200 shadow-2xs">
+              <QrCode className="w-3.5 h-3.5 text-blue-600" />
+              <span>UPI (GPay / PhonePe)</span>
+            </span>
+          )}
           <span className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white border border-slate-200 shadow-2xs">
             <CreditCard className="w-3.5 h-3.5 text-indigo-600" />
-            <span>Debit / Credit Cards</span>
+            <span>{activeCurrencyCode === 'INR' ? 'Debit / Credit Cards' : 'Visa / Mastercard / Amex'}</span>
           </span>
           <span className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white border border-slate-200 shadow-2xs">
             <Building className="w-3.5 h-3.5 text-violet-600" />
-            <span>50+ NetBanking</span>
+            <span>{activeCurrencyCode === 'INR' ? '50+ NetBanking' : 'Global Pro-Rata Refunds'}</span>
           </span>
         </div>
       </div>
@@ -649,6 +748,7 @@ export const PricingView: React.FC<PricingViewProps> = ({ onNavigate }) => {
           billingCycle={successReceipt.billingCycle}
           autoPayEnabled={successReceipt.autoPayEnabled}
           amount={successReceipt.amount}
+          currency={successReceipt.currency}
           onClose={() => setSuccessReceipt(null)}
           onNavigateHome={() => onNavigate('/')}
         />
