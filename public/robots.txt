@@ -9,4 +9,4 @@ User-agent: Googlebot
 Allow: /
 
 # Sitemap
-Sitemap: https://ais-pre-qzxd3j7jptnrh2ejxby5i7-219726218814.asia-southeast1.run.app/sitemap.xml
+Sitemap: https://pixiforge.in/sitemap.xml
