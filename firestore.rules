@@ -49,6 +49,7 @@ service cloud.firestore {
              (!('autoPayUpdatedAt' in data) || data.autoPayUpdatedAt == null || (data.autoPayUpdatedAt is string && data.autoPayUpdatedAt.size() <= 64)) &&
              (!('lastPaymentId' in data) || data.lastPaymentId == null || (data.lastPaymentId is string && data.lastPaymentId.size() <= 128)) &&
              (!('lastPaymentAmount' in data) || data.lastPaymentAmount == null || data.lastPaymentAmount is number) &&
+             (!('lastPaymentCurrency' in data) || data.lastPaymentCurrency == null || (data.lastPaymentCurrency is string && data.lastPaymentCurrency.size() <= 12)) &&
              (!('lastPaymentDate' in data) || data.lastPaymentDate == null || (data.lastPaymentDate is string && data.lastPaymentDate.size() <= 64)) &&
              (!('paymentHistory' in data) || data.paymentHistory == null || (data.paymentHistory is list && data.paymentHistory.size() <= 20));
     }
