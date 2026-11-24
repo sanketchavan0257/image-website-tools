@@ -31,6 +31,22 @@ export const SEOHelper: React.FC<SEOHelperProps> = ({
       title = 'Help & Support - PixiForge Image Tools';
       description =
         'Contact PixiForge support via Email or Mobile Number for help with plans, AutoPay renewals, refunds, or image tools.';
+    } else if (currentPath === '/terms') {
+      title = 'Terms & Conditions - PixiForge Image Tools';
+      description =
+        'Read the Terms & Conditions for using PixiForge client-side image tools and paid subscriptions.';
+    } else if (currentPath === '/privacy-policy') {
+      title = 'Privacy Policy - PixiForge Image Tools';
+      description =
+        'Learn how PixiForge protects your privacy with 100% browser-based image processing and zero server image storage.';
+    } else if (currentPath === '/refund-policy') {
+      title = 'Refund & Cancellation Policy - PixiForge Image Tools';
+      description =
+        'Cancel anytime with transparent pro-rata refunds credited to your account within 7–9 business days.';
+    } else if (currentPath === '/shipping-policy') {
+      title = 'Shipping / Delivery Policy - PixiForge Image Tools';
+      description =
+        'PixiForge provides instant digital activation of paid image editing plans with zero physical shipping.';
     } else if (currentPath === '/admin') {
       title = 'Admin Panel - PixiForge Membership & AutoPay';
       description =
