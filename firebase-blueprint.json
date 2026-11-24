@@ -58,7 +58,11 @@
         },
         "lastPaymentAmount": {
           "type": "number",
-          "description": "Latest Razorpay payment amount in INR"
+          "description": "Latest Razorpay payment amount in the user's payment currency"
+        },
+        "lastPaymentCurrency": {
+          "type": "string",
+          "description": "ISO 4217 currency code of the latest payment (e.g. INR, USD, GBP, CAD)"
         },
         "lastPaymentDate": {
           "type": "string",
