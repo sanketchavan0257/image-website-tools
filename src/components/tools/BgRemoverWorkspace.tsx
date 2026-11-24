@@ -109,6 +109,8 @@ export const BgRemoverWorkspace: React.FC = () => {
       }
       const ctx = displayCanvas.getContext('2d');
       if (!ctx) return;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
 
       ctx.clearRect(0, 0, displayCanvas.width, displayCanvas.height);
 
@@ -469,7 +471,7 @@ export const BgRemoverWorkspace: React.FC = () => {
         downloadFile(blob, `${baseName}-no-bg.${ext}`);
       },
       mimeType,
-      0.95
+      format === 'png' ? 1.0 : 0.98
     );
   };
 
@@ -982,7 +984,7 @@ export const BgRemoverWorkspace: React.FC = () => {
           className="relative flex-1 min-h-[380px] sm:min-h-[500px] flex items-center justify-center overflow-hidden my-4 rounded-2xl select-none"
           style={{
             backgroundImage:
-              'linear-gradient(45deg, #f1f5f9 25%, transparent 25%), linear-gradient(-45deg, #f1f5f9 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #f1f5f9 75%), linear-gradient(-45deg, transparent 75%, #f1f5f9 75%)',
+              'linear-gradient(45deg, #e2e8f0 25%, transparent 25%), linear-gradient(-45deg, #e2e8f0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #e2e8f0 75%), linear-gradient(-45deg, transparent 75%, #e2e8f0 75%)',
             backgroundSize: '20px 20px',
             backgroundPosition: '0 0, 0 10px, 10px -10px, -10px 0px',
           }}
@@ -1027,7 +1029,9 @@ export const BgRemoverWorkspace: React.FC = () => {
           >
             <canvas
               ref={previewCanvasRef}
-              className={`max-w-full max-h-[500px] object-contain rounded-xl shadow-lg touch-none ${
+              className={`max-w-full max-h-[500px] object-contain rounded-xl touch-none ${
+                outputBackground === 'transparent' ? '' : 'shadow-lg'
+              } ${
                 activeTool === 'eyedropper'
                   ? 'cursor-crosshair'
                   : activeTool === 'eraser' || activeTool === 'restore'
