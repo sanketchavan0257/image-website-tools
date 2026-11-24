@@ -52,6 +52,7 @@ export default function App() {
         let planExpiresAt = isSameUser ? user?.planExpiresAt : undefined;
         let lastPaymentId = isSameUser ? user?.lastPaymentId : undefined;
         let lastPaymentAmount = isSameUser ? user?.lastPaymentAmount : undefined;
+        let lastPaymentCurrency = isSameUser ? user?.lastPaymentCurrency : undefined;
         let lastPaymentDate = isSameUser ? user?.lastPaymentDate : undefined;
         let paymentHistory = isSameUser ? user?.paymentHistory : undefined;
         let autoPayEnabled = isSameUser ? user?.autoPayEnabled : undefined;
@@ -78,6 +79,9 @@ export default function App() {
           }
           if (fsProfile?.lastPaymentAmount !== undefined) {
             lastPaymentAmount = fsProfile.lastPaymentAmount;
+          }
+          if (fsProfile?.lastPaymentCurrency) {
+            lastPaymentCurrency = fsProfile.lastPaymentCurrency;
           }
           if (fsProfile?.lastPaymentDate) {
             lastPaymentDate = fsProfile.lastPaymentDate;
@@ -189,6 +193,7 @@ export default function App() {
           autoPayUpdatedAt,
           lastPaymentId,
           lastPaymentAmount,
+          lastPaymentCurrency,
           lastPaymentDate,
           paymentHistory,
           createdAt: user?.createdAt || new Date().toISOString(),
