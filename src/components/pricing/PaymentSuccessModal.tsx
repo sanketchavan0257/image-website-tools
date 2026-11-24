@@ -15,6 +15,7 @@ import {
   getBillingCycleOption,
   calculatePlanExpiryDate,
 } from '../../services/razorpayService';
+import { formatCurrency } from '../../config/currencies';
 
 interface PaymentSuccessModalProps {
   isOpen: boolean;
@@ -23,6 +24,7 @@ interface PaymentSuccessModalProps {
   billingCycle?: BillingCycle;
   autoPayEnabled?: boolean;
   amount: number;
+  currency?: string;
   onClose: () => void;
   onNavigateHome: () => void;
 }
@@ -34,6 +36,7 @@ export const PaymentSuccessModal: React.FC<PaymentSuccessModalProps> = ({
   billingCycle = 'monthly',
   autoPayEnabled = false,
   amount,
+  currency = 'INR',
   onClose,
   onNavigateHome,
 }) => {
@@ -43,7 +46,7 @@ export const PaymentSuccessModal: React.FC<PaymentSuccessModalProps> = ({
 
   const planInfo = plan !== 'free' ? PLAN_PRICING[plan] : null;
   const cycleOpt = getBillingCycleOption(billingCycle);
-  const expiryDateStr = new Date(calculatePlanExpiryDate(billingCycle)).toLocaleDateString('en-IN', {
+  const expiryDateStr = new Date(calculatePlanExpiryDate(billingCycle)).toLocaleDateString('en-US', {
     day: 'numeric',
     month: 'short',
     year: 'numeric',
@@ -114,7 +117,9 @@ export const PaymentSuccessModal: React.FC<PaymentSuccessModalProps> = ({
 
           <div className="flex items-center justify-between pb-2 border-b border-slate-200/80">
             <span className="text-slate-500">Amount Paid</span>
-            <span className="font-bold text-emerald-700">₹{amount.toLocaleString('en-IN')} INR</span>
+            <span className="font-bold text-emerald-700">
+              {formatCurrency(amount, currency, { includeCode: true })}
+            </span>
           </div>
 
           <div className="flex items-center justify-between pb-2 border-b border-slate-200/80">
