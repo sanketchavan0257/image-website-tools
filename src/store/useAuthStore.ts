@@ -257,6 +257,7 @@ interface AuthStoreState {
     paymentInfo?: {
       paymentId?: string;
       amount?: number;
+      currency?: string;
       billingCycle?: BillingCycle;
       autoPayEnabled?: boolean;
       autoPayStatus?: AutoPayStatus;
@@ -694,12 +695,14 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
     const subscriptionId = plan === 'free' ? user.subscriptionId : paymentInfo?.subscriptionId || user.subscriptionId;
 
     const existingHistory = user.paymentHistory || [];
+    const normalizedCurrency = (paymentInfo?.currency || user.lastPaymentCurrency || 'INR').toUpperCase();
     const newRecord: PaymentRecord | null = paymentInfo?.paymentId
       ? {
           paymentId: paymentInfo.paymentId,
           plan,
           billingCycle: cycle,
           amount: paymentInfo.amount ?? 0,
+          currency: normalizedCurrency,
           date: now,
           expiresAt: planExpiresAt,
           autoPay: autoPayEnabled,
@@ -735,6 +738,7 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
         ? {
             lastPaymentId: paymentInfo.paymentId,
             lastPaymentAmount: paymentInfo.amount,
+            lastPaymentCurrency: normalizedCurrency,
             lastPaymentDate: now,
           }
         : {}),
@@ -762,6 +766,7 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
       if (paymentInfo?.paymentId) {
         account.lastPaymentId = paymentInfo.paymentId;
         account.lastPaymentAmount = paymentInfo.amount;
+        account.lastPaymentCurrency = normalizedCurrency;
         account.lastPaymentDate = now;
       }
       saveStoredAccounts(accounts);
@@ -770,6 +775,7 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
     if (user.id) {
       updateUserPlanInFirestore(user.id, plan, {
         ...paymentInfo,
+        currency: normalizedCurrency,
         billingCycle: plan !== 'free' ? cycle : undefined,
         planExpiresAt,
         autoPayEnabled,
@@ -852,6 +858,7 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
           plan: user.plan,
           billingCycle: user.billingCycle || 'monthly',
           amount: user.lastPaymentAmount || 0,
+          currency: user.lastPaymentCurrency || 'INR',
           date: user.lastPaymentDate || user.createdAt,
           expiresAt: user.planExpiresAt,
           status: refundStatus,
@@ -987,6 +994,7 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
           plan: sourceProfile.plan,
           billingCycle: sourceProfile.billingCycle || 'monthly',
           amount: sourceProfile.lastPaymentAmount || refundInfo.refundAmount || 0,
+          currency: sourceProfile.lastPaymentCurrency || 'INR',
           date: sourceProfile.lastPaymentDate || sourceProfile.createdAt,
           expiresAt: sourceProfile.planExpiresAt,
           autoPay: false,
