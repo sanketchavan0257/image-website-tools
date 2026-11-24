@@ -7,6 +7,7 @@ export interface PaymentRecord {
   plan: PlanType;
   billingCycle: BillingCycle;
   amount: number;
+  currency?: string;
   date: string;
   expiresAt?: string;
   autoPay?: boolean;
@@ -36,6 +37,7 @@ export interface UserProfile {
   emailVerified?: boolean;
   lastPaymentId?: string;
   lastPaymentAmount?: number;
+  lastPaymentCurrency?: string;
   lastPaymentDate?: string;
   paymentHistory?: PaymentRecord[];
 }
