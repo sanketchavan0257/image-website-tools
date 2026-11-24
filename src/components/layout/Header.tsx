@@ -30,6 +30,9 @@ import {
   HelpCircle,
   Pencil,
   Check,
+  FileText,
+  RotateCcw,
+  PackageCheck,
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -799,6 +802,78 @@ export const Header: React.FC<HeaderProps> = ({ currentPath, onNavigate }) => {
                 <div className="flex items-center gap-2.5">
                   <HelpCircle className="w-4 h-4 text-emerald-600" />
                   <span>Help & Support</span>
+                </div>
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+              </button>
+
+              <button
+                onClick={() => {
+                  onNavigate('/terms');
+                  setMobileMenuOpen(false);
+                }}
+                className={`w-full flex items-center justify-between p-2.5 rounded-xl font-medium text-xs transition-colors cursor-pointer ${
+                  currentPath === '/terms'
+                    ? 'bg-blue-50 text-blue-700 font-bold'
+                    : 'text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <div className="flex items-center gap-2.5">
+                  <FileText className="w-4 h-4 text-blue-600" />
+                  <span>Terms & Conditions</span>
+                </div>
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+              </button>
+
+              <button
+                onClick={() => {
+                  onNavigate('/privacy-policy');
+                  setMobileMenuOpen(false);
+                }}
+                className={`w-full flex items-center justify-between p-2.5 rounded-xl font-medium text-xs transition-colors cursor-pointer ${
+                  currentPath === '/privacy-policy'
+                    ? 'bg-blue-50 text-blue-700 font-bold'
+                    : 'text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <div className="flex items-center gap-2.5">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                  <span>Privacy Policy</span>
+                </div>
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+              </button>
+
+              <button
+                onClick={() => {
+                  onNavigate('/refund-policy');
+                  setMobileMenuOpen(false);
+                }}
+                className={`w-full flex items-center justify-between p-2.5 rounded-xl font-medium text-xs transition-colors cursor-pointer ${
+                  currentPath === '/refund-policy'
+                    ? 'bg-blue-50 text-blue-700 font-bold'
+                    : 'text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <div className="flex items-center gap-2.5">
+                  <RotateCcw className="w-4 h-4 text-amber-600" />
+                  <span>Refund & Cancellation Policy</span>
+                </div>
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+              </button>
+
+              <button
+                onClick={() => {
+                  onNavigate('/shipping-policy');
+                  setMobileMenuOpen(false);
+                }}
+                className={`w-full flex items-center justify-between p-2.5 rounded-xl font-medium text-xs transition-colors cursor-pointer ${
+                  currentPath === '/shipping-policy'
+                    ? 'bg-blue-50 text-blue-700 font-bold'
+                    : 'text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <div className="flex items-center gap-2.5">
+                  <PackageCheck className="w-4 h-4 text-indigo-600" />
+                  <span>Shipping / Delivery Policy</span>
                 </div>
                 <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
               </button>
