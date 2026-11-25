@@ -283,6 +283,136 @@ export interface DirectRazorpayOptions {
   onDismiss?: () => void;
 }
 
+export const STORAGE_KEY_PENDING_CHECKOUT = 'pixiforge_pending_checkout';
+
+export interface PendingCheckoutState {
+  checkoutId?: string;
+  orderId?: string | null;
+  subscriptionId?: string | null;
+  plan: 'pro' | 'max' | 'ultra';
+  billingCycle: BillingCycle;
+  amount: number;
+  currency: string;
+  autoPay: boolean;
+  userId?: string;
+  userEmail?: string;
+  startedAt: number;
+}
+
+const handledPaymentIdsInMemory = new Set<string>();
+let activeCheckoutInProgress = false;
+
+export function isCheckoutModalOpen(): boolean {
+  return activeCheckoutInProgress;
+}
+
+export function markPaymentHandled(paymentId: string): void {
+  if (paymentId) {
+    handledPaymentIdsInMemory.add(paymentId);
+  }
+}
+
+export function isPaymentHandled(paymentId: string): boolean {
+  return Boolean(paymentId && handledPaymentIdsInMemory.has(paymentId));
+}
+
+export function savePendingCheckout(state: PendingCheckoutState): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(STORAGE_KEY_PENDING_CHECKOUT, JSON.stringify(state));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function getPendingCheckout(): PendingCheckoutState | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PENDING_CHECKOUT);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PendingCheckoutState;
+    if (!parsed || !parsed.plan || !parsed.startedAt) return null;
+    // Expire pending checkout state after 2 hours
+    if (Date.now() - Number(parsed.startedAt) > 2 * 60 * 60 * 1000) {
+      localStorage.removeItem(STORAGE_KEY_PENDING_CHECKOUT);
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function clearPendingCheckout(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(STORAGE_KEY_PENDING_CHECKOUT);
+  } catch {
+    // ignore
+  }
+}
+
+export interface ReconciledPaymentResult {
+  found: boolean;
+  pendingProcessing?: boolean;
+  source?: string;
+  payment?: {
+    paymentId: string;
+    orderId?: string;
+    subscriptionId?: string;
+    plan: 'pro' | 'max' | 'ultra';
+    billingCycle: BillingCycle;
+    amount: number;
+    currency: string;
+    autoPay: boolean;
+    autoPayStatus: AutoPayStatus;
+    method?: string;
+  };
+}
+
+export async function reconcileUserPayments(params: {
+  userId?: string;
+  userEmail?: string;
+  firebaseIdToken?: string;
+  pendingCheckout?: PendingCheckoutState | null;
+  knownPaymentIds?: string[];
+}): Promise<ReconciledPaymentResult> {
+  try {
+    const res = await fetch('/api/payment/reconcile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: params.userId,
+        userEmail: params.userEmail,
+        firebaseIdToken: params.firebaseIdToken,
+        pendingOrderId: params.pendingCheckout?.orderId || undefined,
+        pendingSubscriptionId: params.pendingCheckout?.subscriptionId || undefined,
+        pendingCheckoutId: params.pendingCheckout?.checkoutId || undefined,
+        plan: params.pendingCheckout?.plan,
+        billingCycle: params.pendingCheckout?.billingCycle,
+        amount: params.pendingCheckout?.amount,
+        currency: params.pendingCheckout?.currency,
+        autoPay: params.pendingCheckout?.autoPay,
+        startedAt: params.pendingCheckout?.startedAt,
+        knownPaymentIds: params.knownPaymentIds || [],
+      }),
+    });
+    if (!res.ok) {
+      return { found: false, pendingProcessing: false };
+    }
+    const data = await res.json();
+    return {
+      found: Boolean(data?.found && data?.payment?.paymentId),
+      pendingProcessing: Boolean(data?.pendingProcessing),
+      source: data?.source,
+      payment: data?.payment,
+    };
+  } catch (err) {
+    console.warn('Payment reconcile notice:', err);
+    return { found: false, pendingProcessing: false };
+  }
+}
+
 export async function createOneTimeOrder(payload: {
   plan: 'pro' | 'max' | 'ultra';
   billingCycle: BillingCycle;
@@ -292,7 +422,7 @@ export async function createOneTimeOrder(payload: {
   userId?: string;
   userEmail?: string;
   userName?: string;
-}): Promise<{ orderId: string | null; keyId?: string; mode: string; warning?: string }> {
+}): Promise<{ checkoutId?: string; orderId: string | null; keyId?: string; mode: string; warning?: string }> {
   try {
     const res = await fetch('/api/order/create', {
       method: 'POST',
@@ -305,6 +435,7 @@ export async function createOneTimeOrder(payload: {
     });
     const data = await res.json();
     return {
+      checkoutId: data?.checkoutId || undefined,
       orderId: data?.orderId || null,
       keyId: data?.keyId || undefined,
       mode: data?.mode || 'client_direct_checkout',
@@ -321,6 +452,13 @@ export async function verifyRazorpayPayment(payload: {
   razorpay_order_id?: string;
   razorpay_subscription_id?: string;
   razorpay_signature?: string;
+  plan?: string;
+  billingCycle?: string;
+  amount?: number;
+  currency?: string;
+  autoPay?: boolean;
+  userId?: string;
+  userEmail?: string;
 }): Promise<{ verified: boolean; error?: string }> {
   try {
     const res = await fetch('/api/payment/verify', {
@@ -351,7 +489,7 @@ export async function createAutoPaySubscription(payload: {
   userId?: string;
   userEmail?: string;
   userName?: string;
-}): Promise<{ subscriptionId: string | null; keyId?: string; mode: string; warning?: string }> {
+}): Promise<{ checkoutId?: string; subscriptionId: string | null; keyId?: string; mode: string; warning?: string }> {
   try {
     const res = await fetch('/api/subscription/create', {
       method: 'POST',
@@ -364,6 +502,7 @@ export async function createAutoPaySubscription(payload: {
     });
     const data = await res.json();
     return {
+      checkoutId: data?.checkoutId || undefined,
       subscriptionId: data?.subscriptionId || null,
       keyId: data?.keyId || undefined,
       mode: data?.mode || 'checkout_with_autopay_preference',
@@ -427,6 +566,7 @@ export async function checkAutoPaySubscriptionStatus(subscriptionId: string): Pr
 /**
  * Directly triggers the official Razorpay Checkout Popup in the user's detected currency.
  * Supports INR and all international Razorpay currencies (USD, GBP, CAD, EUR, AUD, JPY, etc.).
+ * Persists pending checkout metadata and watches visibility/focus/dismiss for low-RAM mobile recovery.
  */
 export async function openDirectRazorpayCheckout({
   plan,
@@ -456,6 +596,7 @@ export async function openDirectRazorpayCheckout({
   let effectiveAutoPay = autoPay;
   let createdSubId: string | null = null;
   let createdOrderId: string | null = null;
+  let createdCheckoutId: string | undefined;
   let serverKeyId: string | undefined;
 
   if (autoPay) {
@@ -469,6 +610,7 @@ export async function openDirectRazorpayCheckout({
       userName: user?.name,
     });
     createdSubId = subRes.subscriptionId;
+    createdCheckoutId = subRes.checkoutId;
     serverKeyId = subRes.keyId;
 
     // If low-amount guard triggered or no subscription created, fall back to safe One-Time Order
@@ -486,6 +628,7 @@ export async function openDirectRazorpayCheckout({
         userName: user?.name,
       });
       createdOrderId = orderRes.orderId;
+      createdCheckoutId = orderRes.checkoutId || createdCheckoutId;
       serverKeyId = serverKeyId || orderRes.keyId;
     }
   } else {
@@ -499,7 +642,135 @@ export async function openDirectRazorpayCheckout({
       userName: user?.name,
     });
     createdOrderId = orderRes.orderId;
+    createdCheckoutId = orderRes.checkoutId;
     serverKeyId = orderRes.keyId;
+  }
+
+  const pendingSnapshot: PendingCheckoutState = {
+    checkoutId: createdCheckoutId,
+    orderId: createdOrderId,
+    subscriptionId: createdSubId,
+    plan: planInfo.id as 'pro' | 'max' | 'ultra',
+    billingCycle,
+    amount: priceInfo.totalAmount,
+    currency: currencyCfg.code,
+    autoPay: effectiveAutoPay,
+    userId: user?.id,
+    userEmail: user?.email,
+    startedAt: Date.now(),
+  };
+
+  // Persist to localStorage BEFORE launching GPay / UPI / Razorpay so mobile tab kills never lose payment tracking
+  savePendingCheckout(pendingSnapshot);
+
+  let settled = false;
+  let pollTimer: number | null = null;
+  let checkInFlight = false;
+
+  const knownPaymentIds = (user?.paymentHistory || []).map((p) => p.paymentId).filter(Boolean);
+  if (user?.lastPaymentId && !knownPaymentIds.includes(user.lastPaymentId)) {
+    knownPaymentIds.push(user.lastPaymentId);
+  }
+
+  const cleanupWatchers = () => {
+    activeCheckoutInProgress = false;
+    if (pollTimer !== null) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleReturnFromUpi);
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('focus', handleReturnFromUpi);
+    }
+  };
+
+  activeCheckoutInProgress = true;
+
+  const completeOnce = (
+    paymentId: string,
+    resolvedPlan: PlanType,
+    resolvedAmount: number,
+    resolvedCycle: BillingCycle,
+    autoPayMeta: AutoPayMeta,
+    resolvedCurrency: string
+  ) => {
+    if (settled || isPaymentHandled(paymentId)) return;
+    settled = true;
+    markPaymentHandled(paymentId);
+    clearPendingCheckout();
+    cleanupWatchers();
+    onSuccess(paymentId, resolvedPlan, resolvedAmount, resolvedCycle, autoPayMeta, resolvedCurrency);
+  };
+
+  const runLiveReconcileCheck = async (): Promise<boolean> => {
+    if (settled || checkInFlight) return settled;
+    checkInFlight = true;
+    try {
+      const rec = await reconcileUserPayments({
+        userId: user?.id,
+        userEmail: user?.email,
+        pendingCheckout: pendingSnapshot,
+        knownPaymentIds,
+      });
+      if (rec.found && rec.payment && !settled) {
+        const autoPayMeta: AutoPayMeta =
+          rec.payment.autoPay || Boolean(rec.payment.subscriptionId)
+            ? {
+                autoPayEnabled: true,
+                autoPayStatus: rec.payment.autoPayStatus || 'active',
+                subscriptionId: rec.payment.subscriptionId || createdSubId || undefined,
+              }
+            : {
+                autoPayEnabled: false,
+                autoPayStatus: 'off',
+              };
+        completeOnce(
+          rec.payment.paymentId,
+          rec.payment.plan || planInfo.id,
+          rec.payment.amount || priceInfo.totalAmount,
+          rec.payment.billingCycle || billingCycle,
+          autoPayMeta,
+          rec.payment.currency || currencyCfg.code
+        );
+        return true;
+      }
+    } finally {
+      checkInFlight = false;
+    }
+    return false;
+  };
+
+  const handleReturnFromUpi = () => {
+    if (settled) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    // Give Razorpay modal ~1.2s to fire normal handler first, then double-check via backend API/webhook
+    window.setTimeout(() => {
+      if (!settled) {
+        void runLiveReconcileCheck();
+      }
+    }, 1200);
+  };
+
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleReturnFromUpi);
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('focus', handleReturnFromUpi);
+    pollTimer = window.setInterval(() => {
+      if (settled) {
+        cleanupWatchers();
+        return;
+      }
+      if (Date.now() - pendingSnapshot.startedAt > 10 * 60 * 1000) {
+        cleanupWatchers();
+        return;
+      }
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        void runLiveReconcileCheck();
+      }
+    }, 3000);
   }
 
   const razorpayKey = serverKeyId || getActiveRazorpayKey();
@@ -531,7 +802,15 @@ export async function openDirectRazorpayCheckout({
     },
     modal: {
       ondismiss: () => {
-        if (onDismiss) onDismiss();
+        if (settled) return;
+        // Before treating dismiss as cancellation, verify once if UPI/GPay payment actually succeeded
+        void (async () => {
+          const recovered = await runLiveReconcileCheck();
+          if (recovered || settled) return;
+          cleanupWatchers();
+          // Keep pending checkout for 90s in case webhook lands right after dismiss; App recovery will catch it
+          if (onDismiss) onDismiss();
+        })();
       },
     },
     handler: async (response: any) => {
@@ -539,14 +818,23 @@ export async function openDirectRazorpayCheckout({
       const returnedSubId = response?.razorpay_subscription_id || createdSubId || undefined;
       const returnedOrderId = response?.razorpay_order_id || createdOrderId || undefined;
 
-      if (response?.razorpay_signature) {
+      if (response?.razorpay_signature || response?.razorpay_payment_id) {
         const verification = await verifyRazorpayPayment({
           razorpay_payment_id: paymentId,
           razorpay_order_id: returnedOrderId,
           razorpay_subscription_id: returnedSubId,
-          razorpay_signature: response.razorpay_signature,
+          razorpay_signature: response?.razorpay_signature,
+          plan: planInfo.id,
+          billingCycle,
+          amount: priceInfo.totalAmount,
+          currency: currencyCfg.code,
+          autoPay: effectiveAutoPay,
+          userId: user?.id,
+          userEmail: user?.email,
         });
         if (!verification.verified) {
+          clearPendingCheckout();
+          cleanupWatchers();
           if (onFailure) {
             onFailure(verification.error || 'Payment signature verification failed.');
           }
@@ -564,7 +852,7 @@ export async function openDirectRazorpayCheckout({
             autoPayEnabled: false,
             autoPayStatus: 'off',
           };
-      onSuccess(
+      completeOnce(
         paymentId,
         planInfo.id,
         priceInfo.totalAmount,
@@ -588,12 +876,16 @@ export async function openDirectRazorpayCheckout({
   try {
     const rzp = new (window as any).Razorpay(options);
     rzp.on('payment.failed', (response: any) => {
+      cleanupWatchers();
+      clearPendingCheckout();
       if (onFailure) {
         onFailure(response?.error?.description || 'Payment failed. Please try again.');
       }
     });
     rzp.open();
   } catch (err: any) {
+    cleanupWatchers();
+    clearPendingCheckout();
     console.error('Razorpay open error:', err);
     if (onFailure) {
       onFailure(err?.message || 'Unable to open Razorpay Checkout.');
