@@ -245,7 +245,7 @@ interface AuthStoreState {
   isEmailRegistered: (email: string) => boolean;
   getAccountNameByEmail: (email: string) => string | undefined;
   syncAccountPassword: (email: string, password: string, optionalName?: string) => void;
-  updatePasswordOnly: (email: string, newPassword: string) => { success: boolean; error?: string };
+  updatePasswordOnly: (email: string, newPassword: string, optionalUser?: { id?: string; name?: string }) => { success: boolean; error?: string };
   loginWithEmail: (email: string, password: string, optionalName?: string) => { success: boolean; error?: string };
   signupWithEmail: (name: string, email: string, password: string, code?: string, firebaseUid?: string) => { success: boolean; error?: string };
   loginWithMobileOtp: (phone: string, code: string, optionalName?: string) => { success: boolean; error?: string };
@@ -365,7 +365,7 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
     return accounts.some((a) => a.email?.toLowerCase() === cleanEmail);
   },
 
-  updatePasswordOnly: (email: string, newPassword: string) => {
+  updatePasswordOnly: (email: string, newPassword: string, optionalUser?: { id?: string; name?: string }) => {
     const cleanEmail = email.trim().toLowerCase();
     const cleanPassword = newPassword.trim();
     const accounts = getStoredAccounts();
@@ -373,24 +373,32 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
     const configuredAdmin = getAdminEmail();
 
     if (!account) {
-      if (configuredAdmin && cleanEmail === configuredAdmin) {
-        account = {
-          id: 'usr_admin_1',
-          name: configuredAdmin.split('@')[0] || 'Admin',
-          email: configuredAdmin,
-          authMethod: 'email',
-          passwordHash: cleanPassword,
-          plan: 'free',
-          createdAt: new Date().toISOString(),
-          avatarColor: 'bg-indigo-600',
-        };
-        accounts.push(account);
-      } else {
-        return { success: false, error: 'Email is not registered. Please create a new account.' };
+      account = {
+        id:
+          optionalUser?.id ||
+          (configuredAdmin && cleanEmail === configuredAdmin ? 'usr_admin_1' : `usr_${Date.now()}`),
+        name:
+          optionalUser?.name?.trim() ||
+          cleanEmail.split('@')[0] ||
+          (configuredAdmin && cleanEmail === configuredAdmin ? 'Admin' : 'User'),
+        email: cleanEmail,
+        authMethod: 'email',
+        passwordHash: cleanPassword,
+        plan: 'free',
+        createdAt: new Date().toISOString(),
+        avatarColor: configuredAdmin && cleanEmail === configuredAdmin ? 'bg-indigo-600' : getRandomAvatarColor(),
+      };
+      accounts.push(account);
+    } else {
+      account.passwordHash = cleanPassword;
+      if (optionalUser?.id && account.id.startsWith('usr_') && !optionalUser.id.startsWith('usr_')) {
+        account.id = optionalUser.id;
+      }
+      if (optionalUser?.name?.trim() && (!account.name || account.name === cleanEmail.split('@')[0])) {
+        account.name = optionalUser.name.trim();
       }
     }
 
-    account.passwordHash = cleanPassword;
     saveStoredAccounts(accounts);
 
     const sessionUser: UserProfile = {
@@ -461,16 +469,16 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
       }
     }
 
-    // Comprehensive password verification:
-    // Handles trailing spaces, trimmed strings, default seed fallback, or updated custom password
+    // Strict password verification against stored credential
     const storedHash = account.passwordHash;
-    const isMatch =
-      storedHash === rawPassword ||
-      storedHash === cleanPassword ||
-      storedHash?.trim() === cleanPassword ||
-      storedHash === 'password123' ||
-      cleanPassword === 'password123' ||
-      (Boolean(configuredAdmin && cleanEmail === configuredAdmin) && cleanPassword.length >= 6);
+    const isDemoAccount = cleanEmail === 'demo@pixiforge.app';
+    const isMatch = Boolean(
+      storedHash &&
+        (storedHash === rawPassword ||
+          storedHash === cleanPassword ||
+          storedHash.trim() === cleanPassword ||
+          (isDemoAccount && cleanPassword === 'password123'))
+    );
 
     if (!isMatch) {
       return { success: false, error: 'Incorrect password. Try again or click Forgot Password.' };
