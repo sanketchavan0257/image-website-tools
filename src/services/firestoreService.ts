@@ -297,7 +297,47 @@ export async function updateUserPlanInFirestore(
     await updateDoc(userRef, updatePayload);
     console.log(`[Firestore] Updated plan to "${plan}" for ${path}`);
     return true;
-  } catch (err) {
+  } catch (err: any) {
+    if (err?.code === 'not-found' && auth.currentUser) {
+      try {
+        const userRef = doc(db, 'users', userId);
+        const now = new Date().toISOString();
+        const fallbackName =
+          auth.currentUser.displayName?.trim() ||
+          auth.currentUser.email?.split('@')[0] ||
+          'User';
+        const createPayload: Record<string, any> = {
+          userId,
+          name: fallbackName.slice(0, 100),
+          plan,
+          createdAt: now,
+          updatedAt: now,
+          ...(auth.currentUser.email ? { email: auth.currentUser.email.trim().toLowerCase().slice(0, 150) } : {}),
+          ...(paymentInfo?.billingCycle && plan !== 'free' ? { billingCycle: paymentInfo.billingCycle } : {}),
+          ...(paymentInfo?.planExpiresAt && plan !== 'free' ? { planExpiresAt: paymentInfo.planExpiresAt } : {}),
+          ...(paymentInfo?.autoPayEnabled !== undefined ? { autoPayEnabled: plan === 'free' ? false : paymentInfo.autoPayEnabled } : {}),
+          ...(paymentInfo?.autoPayStatus ? { autoPayStatus: paymentInfo.autoPayStatus } : {}),
+          ...(paymentInfo?.subscriptionId ? { subscriptionId: paymentInfo.subscriptionId } : {}),
+          ...(paymentInfo?.paymentId
+            ? {
+                lastPaymentId: paymentInfo.paymentId,
+                ...(paymentInfo.amount !== undefined ? { lastPaymentAmount: paymentInfo.amount } : {}),
+                ...(paymentInfo.currency
+                  ? { lastPaymentCurrency: String(paymentInfo.currency).trim().toUpperCase().slice(0, 12) }
+                  : {}),
+                lastPaymentDate: now,
+              }
+            : {}),
+          ...(paymentInfo?.paymentHistory ? { paymentHistory: paymentInfo.paymentHistory.slice(0, 20) } : {}),
+        };
+        await setDoc(userRef, createPayload, { merge: true });
+        console.log(`[Firestore] Created & updated plan to "${plan}" for ${path}`);
+        return true;
+      } catch (createErr) {
+        handleFirestoreError(createErr, OperationType.WRITE, path);
+        return false;
+      }
+    }
     handleFirestoreError(err, OperationType.UPDATE, path);
     return false;
   }
