@@ -5,7 +5,8 @@ import fs from 'fs';
 import os from 'os';
 import zlib from 'zlib';
 import crypto from 'crypto';
-import nodemailer from 'nodemailer';
+import net from 'net';
+import tls from 'tls';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import {
@@ -941,39 +942,213 @@ async function startServer() {
 
     const errors: string[] = [];
 
-    // 1. Try Nodemailer SMTP (Gmail App Password / Brevo SMTP Relay / Custom SMTP)
+    const sendBuiltInSmtp = async (opts: {
+      host: string;
+      port: number;
+      secure: boolean;
+      user: string;
+      pass: string;
+      fromAddress: string;
+      fromName: string;
+      toEmail: string;
+      toName?: string;
+      replyTo?: { email: string; name?: string };
+      subject: string;
+      htmlContent: string;
+    }): Promise<{ messageId: string }> => {
+      const stripCrlf = (v: string) => String(v || '').replace(/[\r\n]+/g, ' ').trim();
+      const wrapBase64 = (buf: Buffer) =>
+        (buf.toString('base64').match(/.{1,76}/g) || ['']).join('\r\n');
+
+      const readResponse = (sock: net.Socket | tls.TLSSocket): Promise<{ code: number; text: string }> =>
+        new Promise((resolve, reject) => {
+          let buffer = '';
+          const cleanup = () => {
+            sock.removeListener('data', onData);
+            sock.removeListener('error', onErr);
+            sock.removeListener('close', onClose);
+            sock.removeListener('timeout', onTimeout);
+          };
+          const onErr = (e: Error) => {
+            cleanup();
+            reject(e);
+          };
+          const onClose = () => {
+            cleanup();
+            reject(new Error('SMTP connection closed unexpectedly'));
+          };
+          const onTimeout = () => {
+            cleanup();
+            reject(new Error('SMTP connection timed out'));
+          };
+          const onData = (chunk: Buffer) => {
+            buffer += chunk.toString('utf8');
+            const lines = buffer.split(/\r?\n/);
+            if (lines.length < 2) return;
+            // Last line must be complete (trailing empty element after \n)
+            if (lines[lines.length - 1] !== '') return;
+            const completeLines = lines.slice(0, -1).filter(Boolean);
+            if (completeLines.length === 0) return;
+            const lastLine = completeLines[completeLines.length - 1];
+            const m = lastLine.match(/^(\d{3})([ -])/);
+            if (m && m[2] === ' ') {
+              cleanup();
+              resolve({ code: Number(m[1]), text: completeLines.join('\n') });
+            }
+          };
+          sock.on('data', onData);
+          sock.once('error', onErr);
+          sock.once('close', onClose);
+          sock.once('timeout', onTimeout);
+        });
+
+      const sendCmd = async (
+        sock: net.Socket | tls.TLSSocket,
+        cmd: string,
+        expectedCodes: number[]
+      ): Promise<string> => {
+        sock.write(`${cmd}\r\n`);
+        const res = await readResponse(sock);
+        if (!expectedCodes.includes(res.code)) {
+          throw new Error(`SMTP ${res.code}: ${res.text}`);
+        }
+        return res.text;
+      };
+
+      let sock: net.Socket | tls.TLSSocket = opts.secure
+        ? tls.connect({ host: opts.host, port: opts.port, servername: opts.host })
+        : net.connect({ host: opts.host, port: opts.port });
+      sock.setTimeout(12000);
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const eventName = opts.secure ? 'secureConnect' : 'connect';
+          const onFail = (e: Error) => reject(e);
+          sock.once('error', onFail);
+          sock.once(eventName, () => {
+            sock.removeListener('error', onFail);
+            resolve();
+          });
+        });
+
+        const greet = await readResponse(sock);
+        if (greet.code !== 220) throw new Error(`SMTP greeting ${greet.code}: ${greet.text}`);
+
+        let ehloText = await sendCmd(sock, 'EHLO pixiforge.in', [250]);
+
+        if (!opts.secure && /STARTTLS/i.test(ehloText)) {
+          await sendCmd(sock, 'STARTTLS', [220]);
+          sock = await new Promise<tls.TLSSocket>((resolve, reject) => {
+            const tlsSock = tls.connect({ socket: sock, servername: opts.host });
+            tlsSock.setTimeout(12000);
+            tlsSock.once('error', reject);
+            tlsSock.once('secureConnect', () => {
+              tlsSock.removeListener('error', reject);
+              resolve(tlsSock);
+            });
+          });
+          ehloText = await sendCmd(sock, 'EHLO pixiforge.in', [250]);
+        }
+
+        await sendCmd(sock, 'AUTH LOGIN', [334]);
+        await sendCmd(sock, Buffer.from(opts.user, 'utf8').toString('base64'), [334]);
+        await sendCmd(sock, Buffer.from(opts.pass, 'utf8').toString('base64'), [235]);
+
+        await sendCmd(sock, `MAIL FROM:<${stripCrlf(opts.fromAddress)}>`, [250]);
+        await sendCmd(sock, `RCPT TO:<${stripCrlf(opts.toEmail)}>`, [250, 251]);
+        await sendCmd(sock, 'DATA', [354]);
+
+        const msgId = `<${crypto.randomBytes(12).toString('hex')}@pixiforge.in>`;
+        const encodedSubject = `=?UTF-8?B?${Buffer.from(stripCrlf(opts.subject), 'utf8').toString('base64')}?=`;
+        const headers = [
+          `Date: ${new Date().toUTCString()}`,
+          `Message-ID: ${msgId}`,
+          `From: "${stripCrlf(opts.fromName).replace(/"/g, '')}" <${stripCrlf(opts.fromAddress)}>`,
+          `To: ${
+            opts.toName
+              ? `"${stripCrlf(opts.toName).replace(/"/g, '')}" <${stripCrlf(opts.toEmail)}>`
+              : stripCrlf(opts.toEmail)
+          }`,
+          ...(opts.replyTo?.email
+            ? [
+                `Reply-To: ${
+                  opts.replyTo.name
+                    ? `"${stripCrlf(opts.replyTo.name).replace(/"/g, '')}" <${stripCrlf(opts.replyTo.email)}>`
+                    : stripCrlf(opts.replyTo.email)
+                }`,
+              ]
+            : []),
+          `Subject: ${encodedSubject}`,
+          'MIME-Version: 1.0',
+          'Content-Type: text/html; charset=UTF-8',
+          'Content-Transfer-Encoding: base64',
+        ];
+        const mimeBody = `${headers.join('\r\n')}\r\n\r\n${wrapBase64(Buffer.from(opts.htmlContent, 'utf8'))}\r\n.`;
+        await sendCmd(sock, mimeBody, [250]);
+        await sendCmd(sock, 'QUIT', [221]).catch(() => '');
+        return { messageId: msgId };
+      } finally {
+        sock.destroy();
+      }
+    };
+
+    // 1. Try SMTP (Nodemailer if installed, otherwise built-in Node TLS/STARTTLS client)
     if (smtpHost && smtpUser && smtpPass) {
       try {
-        const transporter = nodemailer.createTransport({
+        const fromAddress = configuredSender || smtpUser;
+        const nodemailerMod = await import('nodemailer').catch(() => null);
+        if (nodemailerMod?.default) {
+          const transporter = nodemailerMod.default.createTransport({
+            host: smtpHost,
+            port: smtpPort,
+            secure: smtpSecure,
+            auth: {
+              user: smtpUser,
+              pass: smtpPass,
+            },
+            connectionTimeout: 10000,
+            greetingTimeout: 10000,
+            socketTimeout: 12000,
+          });
+          const info = await transporter.sendMail({
+            from: `"${params.senderName}" <${fromAddress}>`,
+            to: params.toName ? `"${params.toName}" <${params.toEmail}>` : params.toEmail,
+            ...(params.replyTo?.email
+              ? {
+                  replyTo: params.replyTo.name
+                    ? `"${params.replyTo.name}" <${params.replyTo.email}>`
+                    : params.replyTo.email,
+                }
+              : {}),
+            subject: params.subject,
+            html: params.htmlContent,
+          });
+          return {
+            ok: true,
+            status: 200,
+            messageId: info.messageId,
+            provider: 'smtp',
+          };
+        }
+
+        const builtInInfo = await sendBuiltInSmtp({
           host: smtpHost,
           port: smtpPort,
           secure: smtpSecure,
-          auth: {
-            user: smtpUser,
-            pass: smtpPass,
-          },
-          connectionTimeout: 10000,
-          greetingTimeout: 10000,
-          socketTimeout: 12000,
-        });
-        const fromAddress = configuredSender || smtpUser;
-        const info = await transporter.sendMail({
-          from: `"${params.senderName}" <${fromAddress}>`,
-          to: params.toName ? `"${params.toName}" <${params.toEmail}>` : params.toEmail,
-          ...(params.replyTo?.email
-            ? {
-                replyTo: params.replyTo.name
-                  ? `"${params.replyTo.name}" <${params.replyTo.email}>`
-                  : params.replyTo.email,
-              }
-            : {}),
+          user: smtpUser,
+          pass: smtpPass,
+          fromAddress,
+          fromName: params.senderName,
+          toEmail: params.toEmail,
+          toName: params.toName,
+          replyTo: params.replyTo,
           subject: params.subject,
-          html: params.htmlContent,
+          htmlContent: params.htmlContent,
         });
         return {
           ok: true,
           status: 200,
-          messageId: info.messageId,
+          messageId: builtInInfo.messageId,
           provider: 'smtp',
         };
       } catch (err: any) {
