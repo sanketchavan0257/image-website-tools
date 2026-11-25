@@ -20,8 +20,20 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from './services/firebase';
 import { useAuthStore } from './store/useAuthStore';
 import { getUserFromFirestore, updateUserPlanInFirestore } from './services/firestoreService';
-import { checkAutoPaySubscriptionStatus } from './services/razorpayService';
+import {
+  calculatePlanExpiryDate,
+  checkAutoPaySubscriptionStatus,
+  clearPendingCheckout,
+  getPendingCheckout,
+  isCheckoutModalOpen,
+  isPaymentHandled,
+  markPaymentHandled,
+  reconcileUserPayments,
+} from './services/razorpayService';
 import { trackWebsiteVisit, syncCurrentViewToFirestore } from './services/analyticsService';
+import { PaymentSuccessModal } from './components/pricing/PaymentSuccessModal';
+import { BillingCycle, PlanType } from './types';
+import { PaymentRecord } from './types/auth';
 
 export default function App() {
   const [currentPath, setCurrentPath] = useState<string>(() => {
@@ -36,13 +48,143 @@ export default function App() {
     setToastMessage,
   } = useImageStore();
 
+  const [isVerifyingPayment, setIsVerifyingPayment] = useState(false);
+  const [reconciledReceipt, setReconciledReceipt] = useState<{
+    paymentId: string;
+    plan: PlanType;
+    billingCycle: BillingCycle;
+    autoPayEnabled: boolean;
+    amount: number;
+    currency: string;
+  } | null>(null);
+
   // Record website visit once per page load (Country, State, District, Taluka + timestamp)
   useEffect(() => {
     trackWebsiteVisit(window.location.pathname || '/').catch(() => {});
   }, []);
 
-  // Persistent login + strict membership expiry/AutoPay verification
+  // Inspect Razorpay callback query params if a redirect/callback flow landed on the page
   useEffect(() => {
+    try {
+      const searchParams = new URLSearchParams(window.location.search);
+      const rzpStatus = searchParams.get('rzp_status');
+      const rzpError = searchParams.get('rzp_error');
+      if (rzpStatus) {
+        if (rzpStatus === 'failed') {
+          clearPendingCheckout();
+          setToastMessage(rzpError || 'Payment could not be completed. Please try again.');
+        }
+        ['rzp_status', 'rzp_error', 'rzp_payment_id', 'rzp_order_id', 'rzp_subscription_id'].forEach((k) =>
+          searchParams.delete(k)
+        );
+        const cleanQuery = searchParams.toString();
+        const nextUrl = `${window.location.pathname}${cleanQuery ? `?${cleanQuery}` : ''}${window.location.hash}`;
+        window.history.replaceState({}, '', nextUrl);
+      }
+    } catch {
+      // ignore URL parse errors
+    }
+  }, [setToastMessage]);
+
+  // Persistent login + strict membership expiry/AutoPay verification + automatic post-refresh payment recovery
+  useEffect(() => {
+    let active = true;
+    let pendingRetryTimer: number | null = null;
+
+    const applyReconciledPaymentToStore = (
+      payment: NonNullable<Awaited<ReturnType<typeof reconcileUserPayments>>['payment']>,
+      skipModalIfHandled = true
+    ) => {
+      if (skipModalIfHandled && isPaymentHandled(payment.paymentId)) {
+        return false;
+      }
+      markPaymentHandled(payment.paymentId);
+      clearPendingCheckout();
+
+      const authState = useAuthStore.getState();
+      if (authState.user) {
+        authState.updateUserPlan(payment.plan, {
+          paymentId: payment.paymentId,
+          amount: payment.amount,
+          currency: payment.currency,
+          billingCycle: payment.billingCycle,
+          autoPayEnabled: payment.autoPay,
+          autoPayStatus: payment.autoPayStatus,
+          subscriptionId: payment.subscriptionId,
+        });
+      }
+      useImageStore.getState().setPlan(payment.plan);
+
+      if (active) {
+        setIsVerifyingPayment(false);
+        setReconciledReceipt({
+          paymentId: payment.paymentId,
+          plan: payment.plan,
+          billingCycle: payment.billingCycle,
+          autoPayEnabled: payment.autoPay,
+          amount: payment.amount,
+          currency: payment.currency,
+        });
+      }
+      return true;
+    };
+
+    const schedulePendingCheckoutRetries = (
+      userId?: string,
+      userEmail?: string,
+      firebaseIdToken?: string,
+      knownPaymentIds: string[] = []
+    ) => {
+      const pending = getPendingCheckout();
+      if (!pending || !active) return;
+
+      if (pendingRetryTimer !== null) {
+        window.clearTimeout(pendingRetryTimer);
+        pendingRetryTimer = null;
+      }
+
+      setIsVerifyingPayment(true);
+      let attempt = 0;
+      const delays = [1800, 2500, 3500, 5000, 7000];
+
+      const runAttempt = async () => {
+        if (!active) return;
+        const latestPending = getPendingCheckout();
+        if (!latestPending) {
+          setIsVerifyingPayment(false);
+          return;
+        }
+        const rec = await reconcileUserPayments({
+          userId,
+          userEmail,
+          firebaseIdToken,
+          pendingCheckout: latestPending,
+          knownPaymentIds,
+        });
+        if (!active) return;
+        if (rec.found && rec.payment) {
+          applyReconciledPaymentToStore(rec.payment, true);
+          return;
+        }
+        if (attempt < delays.length) {
+          const delay = delays[attempt++];
+          pendingRetryTimer = window.setTimeout(() => {
+            void runAttempt();
+          }, delay);
+        } else {
+          setIsVerifyingPayment(false);
+          // Clear stale pending marker after all retries if Razorpay shows no pending processing
+          if (!rec.pendingProcessing && Date.now() - latestPending.startedAt > 120_000) {
+            clearPendingCheckout();
+          }
+        }
+      };
+
+      pendingRetryTimer = window.setTimeout(() => {
+        void runAttempt();
+      }, 1000);
+    };
+
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser) {
         syncCurrentViewToFirestore(fbUser.uid).catch(() => {});
@@ -104,6 +246,89 @@ export default function App() {
           }
         } catch (err) {
           console.warn('[App] Firestore user profile sync note:', err);
+        }
+
+        // Reconcile any verified Razorpay webhook/GPay/UPI payment made before browser refresh or app kill
+        const knownPaymentIds = Array.from(
+          new Set(
+            [
+              lastPaymentId,
+              ...(Array.isArray(paymentHistory) ? paymentHistory.map((p) => p.paymentId) : []),
+            ].filter(Boolean) as string[]
+          )
+        );
+        const pendingCheckout = getPendingCheckout();
+        let fbIdToken: string | undefined;
+        try {
+          fbIdToken = await fbUser.getIdToken();
+        } catch {
+          // optional token
+        }
+
+        const reconciled = await reconcileUserPayments({
+          userId: fbUser.uid,
+          userEmail: fbUser.email || user?.email,
+          firebaseIdToken: fbIdToken,
+          pendingCheckout,
+          knownPaymentIds,
+        });
+
+        let newlyReconciledPayment: NonNullable<typeof reconciled.payment> | null = null;
+        if (reconciled.found && reconciled.payment && !isPaymentHandled(reconciled.payment.paymentId)) {
+          const recPay = reconciled.payment;
+          markPaymentHandled(recPay.paymentId);
+          clearPendingCheckout();
+          newlyReconciledPayment = recPay;
+
+          const nowIso = new Date().toISOString();
+          plan = recPay.plan;
+          billingCycle = recPay.billingCycle;
+          planExpiresAt = calculatePlanExpiryDate(recPay.billingCycle);
+          autoPayEnabled = recPay.autoPay;
+          autoPayStatus = recPay.autoPayStatus;
+          if (recPay.subscriptionId) {
+            subscriptionId = recPay.subscriptionId;
+          }
+          autoPayUpdatedAt = nowIso;
+          lastPaymentId = recPay.paymentId;
+          lastPaymentAmount = recPay.amount;
+          lastPaymentCurrency = recPay.currency;
+          lastPaymentDate = nowIso;
+
+          const newRecord: PaymentRecord = {
+            paymentId: recPay.paymentId,
+            plan: recPay.plan,
+            billingCycle: recPay.billingCycle,
+            amount: recPay.amount,
+            currency: recPay.currency,
+            date: nowIso,
+            expiresAt: planExpiresAt,
+            autoPay: recPay.autoPay,
+            subscriptionId: recPay.subscriptionId,
+          };
+          paymentHistory = [
+            newRecord,
+            ...(paymentHistory || []).filter((r) => r.paymentId !== newRecord.paymentId),
+          ].slice(0, 20);
+
+          updateUserPlanInFirestore(fbUser.uid, plan, {
+            paymentId: recPay.paymentId,
+            amount: recPay.amount,
+            currency: recPay.currency,
+            billingCycle,
+            planExpiresAt,
+            autoPayEnabled,
+            autoPayStatus,
+            subscriptionId,
+            paymentHistory: paymentHistory as any,
+          }).catch(() => {});
+        } else if (pendingCheckout) {
+          schedulePendingCheckoutRetries(
+            fbUser.uid,
+            fbUser.email || user?.email,
+            fbIdToken,
+            knownPaymentIds
+          );
         }
 
         // Guard: if a profile holds a paid plan with zero payment records (legacy seeded state), reset to free
@@ -204,19 +429,63 @@ export default function App() {
 
         setSessionUser(restoredUser as any);
         useImageStore.getState().setPlan(plan);
+
+        if (newlyReconciledPayment && active) {
+          setIsVerifyingPayment(false);
+          setReconciledReceipt({
+            paymentId: newlyReconciledPayment.paymentId,
+            plan: newlyReconciledPayment.plan,
+            billingCycle: newlyReconciledPayment.billingCycle,
+            autoPayEnabled: newlyReconciledPayment.autoPay,
+            amount: newlyReconciledPayment.amount,
+            currency: newlyReconciledPayment.currency,
+          });
+        }
       } else {
-        // Ensure non-Firebase/local sessions also enforce expiry & AutoPay checks
+        // Ensure non-Firebase/local sessions also recover pending GPay/UPI payments & enforce expiry checks
         const { user, setSessionUser } = useAuthStore.getState();
         let localPlan = user?.plan || 'free';
-        if (user && localPlan !== 'free' && user.planExpiresAt) {
-          const expiryMs = new Date(user.planExpiresAt).getTime();
+        const pendingCheckout = getPendingCheckout();
+
+        if (user || pendingCheckout) {
+          const knownIds = Array.from(
+            new Set(
+              [
+                user?.lastPaymentId,
+                ...(Array.isArray(user?.paymentHistory) ? user.paymentHistory.map((p) => p.paymentId) : []),
+              ].filter(Boolean) as string[]
+            )
+          );
+          const rec = await reconcileUserPayments({
+            userId: user?.id || pendingCheckout?.userId,
+            userEmail: user?.email || pendingCheckout?.userEmail,
+            pendingCheckout,
+            knownPaymentIds: knownIds,
+          });
+          if (rec.found && rec.payment && !isPaymentHandled(rec.payment.paymentId)) {
+            applyReconciledPaymentToStore(rec.payment, true);
+            localPlan = rec.payment.plan;
+          } else if (pendingCheckout) {
+            schedulePendingCheckoutRetries(
+              user?.id || pendingCheckout.userId,
+              user?.email || pendingCheckout.userEmail,
+              undefined,
+              knownIds
+            );
+          }
+        }
+
+        const refreshedUser = useAuthStore.getState().user;
+        localPlan = refreshedUser?.plan || localPlan;
+        if (refreshedUser && localPlan !== 'free' && refreshedUser.planExpiresAt) {
+          const expiryMs = new Date(refreshedUser.planExpiresAt).getTime();
           if (!Number.isNaN(expiryMs) && Date.now() > expiryMs) {
             let renewed = false;
-            if (user.autoPayEnabled && user.subscriptionId && !user.subscriptionId.startsWith('sub_pref_')) {
-              const subCheck = await checkAutoPaySubscriptionStatus(user.subscriptionId);
+            if (refreshedUser.autoPayEnabled && refreshedUser.subscriptionId && !refreshedUser.subscriptionId.startsWith('sub_pref_')) {
+              const subCheck = await checkAutoPaySubscriptionStatus(refreshedUser.subscriptionId);
               if (subCheck.isActive && subCheck.currentEndISO) {
                 setSessionUser({
-                  ...user,
+                  ...refreshedUser,
                   planExpiresAt: subCheck.currentEndISO,
                   autoPayStatus: 'active',
                 });
@@ -226,7 +495,7 @@ export default function App() {
             if (!renewed) {
               localPlan = 'free';
               setSessionUser({
-                ...user,
+                ...refreshedUser,
                 plan: 'free',
                 billingCycle: undefined,
                 planExpiresAt: undefined,
@@ -240,7 +509,54 @@ export default function App() {
       }
     });
 
-    return () => unsubscribe();
+    const handleVisibilityRecovery = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (isCheckoutModalOpen()) return;
+      const pending = getPendingCheckout();
+      if (!pending) return;
+      const currentUser = useAuthStore.getState().user;
+      const knownIds = Array.from(
+        new Set(
+          [
+            currentUser?.lastPaymentId,
+            ...(Array.isArray(currentUser?.paymentHistory)
+              ? currentUser.paymentHistory.map((p) => p.paymentId)
+              : []),
+          ].filter(Boolean) as string[]
+        )
+      );
+      void (async () => {
+        let token: string | undefined;
+        try {
+          token = auth.currentUser ? await auth.currentUser.getIdToken() : undefined;
+        } catch {
+          // ignore
+        }
+        const rec = await reconcileUserPayments({
+          userId: currentUser?.id || pending.userId,
+          userEmail: currentUser?.email || pending.userEmail,
+          firebaseIdToken: token,
+          pendingCheckout: pending,
+          knownPaymentIds: knownIds,
+        });
+        if (rec.found && rec.payment) {
+          applyReconciledPaymentToStore(rec.payment, true);
+        }
+      })();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityRecovery);
+    window.addEventListener('focus', handleVisibilityRecovery);
+
+    return () => {
+      active = false;
+      if (pendingRetryTimer !== null) {
+        window.clearTimeout(pendingRetryTimer);
+      }
+      document.removeEventListener('visibilitychange', handleVisibilityRecovery);
+      window.removeEventListener('focus', handleVisibilityRecovery);
+      unsubscribe();
+    };
   }, []);
 
   // Handle browser back/forward history navigation
@@ -382,6 +698,29 @@ export default function App() {
 
       {/* Global Footer (Hidden on auth pages for 100% full-screen view) */}
       {!isAuthPage && <Footer onNavigate={navigate} />}
+
+      {/* Global Pending Payment Verification Banner (after mobile refresh from GPay / UPI app) */}
+      {isVerifyingPayment && !reconciledReceipt && (
+        <div className="fixed bottom-5 right-5 z-50 max-w-sm bg-blue-600 text-white text-xs px-4 py-3 rounded-2xl shadow-xl flex items-center gap-3 border border-blue-400">
+          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0" />
+          <span className="font-semibold">तुमचे GPay / UPI पेमेंट Razorpay सोबत तपासत आहे...</span>
+        </div>
+      )}
+
+      {/* Global Recovered Payment Success Celebration Modal */}
+      {reconciledReceipt && (
+        <PaymentSuccessModal
+          isOpen={Boolean(reconciledReceipt)}
+          paymentId={reconciledReceipt.paymentId}
+          plan={reconciledReceipt.plan}
+          billingCycle={reconciledReceipt.billingCycle}
+          autoPayEnabled={reconciledReceipt.autoPayEnabled}
+          amount={reconciledReceipt.amount}
+          currency={reconciledReceipt.currency}
+          onClose={() => setReconciledReceipt(null)}
+          onNavigateHome={() => navigate('/')}
+        />
+      )}
 
       {/* Plan Limits Warning / Upgrade Modal */}
       <PlanLimitModal onNavigateToPricing={() => navigate('/pricing')} />
