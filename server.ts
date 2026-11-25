@@ -5,6 +5,7 @@ import fs from 'fs';
 import os from 'os';
 import zlib from 'zlib';
 import crypto from 'crypto';
+import nodemailer from 'nodemailer';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import {
@@ -764,38 +765,102 @@ async function startServer() {
     res.json(getPublicRuntimeEnv());
   });
 
-  // Server-side OTP email delivery via Brevo using env variables
-  app.post('/api/email/send-otp', async (req, res) => {
+  const SERVER_OTP_SECRET =
+    (process.env.OTP_SECRET || process.env.SESSION_SECRET || '').trim() ||
+    crypto.randomBytes(32).toString('hex');
+  const AUTH_ACCOUNTS_STORE_PATH = path.join(os.tmpdir(), 'pixiforge-auth-accounts.json');
+  const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  interface ServerAuthAccount {
+    id: string;
+    name: string;
+    email: string;
+    passwordHash: string;
+    salt: string;
+    createdAt: string;
+    updatedAt: string;
+  }
+
+  interface OtpChallengeRecord {
+    otpHash: string;
+    purpose: 'signup' | 'forgot';
+    expiresAt: number;
+    attempts: number;
+    lastSentAt: number;
+  }
+
+  interface VerifiedTokenRecord {
+    email: string;
+    purpose: 'signup' | 'forgot';
+    expiresAt: number;
+  }
+
+  const otpChallengeMap = new Map<string, OtpChallengeRecord>();
+  const otpRequestWindowMap = new Map<string, number[]>();
+  const verifiedTokenMap = new Map<string, VerifiedTokenRecord>();
+
+  function loadServerAuthAccounts(): ServerAuthAccount[] {
     try {
-      const { toEmail, otpCode, purpose } = req.body || {};
-      const cleanTo = String(toEmail || '').trim();
-      const cleanOtp = String(otpCode || '').trim();
-      if (!cleanTo || !cleanOtp) {
-        return res.status(400).json({ success: false, error: 'Recipient email and OTP code are required.' });
+      if (fs.existsSync(AUTH_ACCOUNTS_STORE_PATH)) {
+        const raw = fs.readFileSync(AUTH_ACCOUNTS_STORE_PATH, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((a) => a && typeof a.email === 'string' && typeof a.passwordHash === 'string');
+        }
       }
+    } catch (err) {
+      console.warn('[Auth] Failed loading server auth accounts:', err);
+    }
+    return [];
+  }
 
-      const brevoApiKey = (process.env.BREVO_API_KEY || process.env.VITE_BREVO_API_KEY || '').trim();
-      const { ADMIN_EMAIL, SUPPORT_EMAIL } = getPublicRuntimeEnv();
-      const senderEmail = (
-        process.env.SENDER_EMAIL ||
-        process.env.VITE_SENDER_EMAIL ||
-        SUPPORT_EMAIL ||
-        ADMIN_EMAIL
-      ).trim();
+  function saveServerAuthAccounts(accounts: ServerAuthAccount[]) {
+    try {
+      fs.writeFileSync(AUTH_ACCOUNTS_STORE_PATH, JSON.stringify(accounts.slice(0, 10000)), 'utf8');
+    } catch (err) {
+      console.warn('[Auth] Failed saving server auth accounts:', err);
+    }
+  }
 
-      if (!brevoApiKey || !senderEmail) {
-        return res.status(503).json({
-          success: false,
-          error: 'Email service is not configured. Set BREVO_API_KEY and ADMIN_EMAIL/SUPPORT_EMAIL in environment variables.',
-        });
+  function hashServerPassword(password: string, salt?: string): { hash: string; salt: string } {
+    const useSalt = salt || crypto.randomBytes(16).toString('hex');
+    const derived = crypto.scryptSync(password, useSalt, 64).toString('hex');
+    return { hash: derived, salt: useSalt };
+  }
+
+  function verifyServerPassword(password: string, storedHash: string, salt: string): boolean {
+    try {
+      const candidate = crypto.scryptSync(password, salt, 64);
+      const expected = Buffer.from(storedHash, 'hex');
+      if (candidate.length !== expected.length) return false;
+      return crypto.timingSafeEqual(candidate, expected);
+    } catch {
+      return false;
+    }
+  }
+
+  function hashOtpChallenge(email: string, purpose: 'signup' | 'forgot', otpCode: string): string {
+    return crypto
+      .createHmac('sha256', SERVER_OTP_SECRET)
+      .update(`${purpose}:${email}:${otpCode}`)
+      .digest('hex');
+  }
+
+  function getFirebaseWebApiKey(): string {
+    try {
+      const cfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
+      if (fs.existsSync(cfgPath)) {
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        return String(cfg.apiKey || '').trim();
       }
+    } catch {
+      // ignore
+    }
+    return '';
+  }
 
-      const subject =
-        purpose === 'forgot'
-          ? `PixiForge - Password Reset OTP: ${cleanOtp}`
-          : `PixiForge - Your 6-Digit Email Verification Code: ${cleanOtp}`;
-
-      const htmlContent = `
+  function buildOtpEmailHtml(cleanOtp: string, purpose: 'signup' | 'forgot', subject: string): string {
+    return `
         <!DOCTYPE html>
         <html lang="en">
         <head><meta charset="utf-8"><title>${escapeServerHtml(subject)}</title></head>
@@ -810,46 +875,555 @@ async function startServer() {
               <p style="font-size:14px;line-height:1.6;color:#475569;margin:0 0 24px 0;">
                 ${
                   purpose === 'forgot'
-                    ? 'We received a request to reset your PixiForge password. Please enter the 6-digit verification code below:'
-                    : 'Thank you for signing up with PixiForge. Please verify your email address by entering the 6-digit OTP code below:'
+                    ? 'We received a request to reset your PixiForge account password. Enter the 6-digit OTP code below in the app to set a new password (no reset link is needed):'
+                    : 'Thank you for creating a new account with PixiForge. Enter the 6-digit OTP code below to verify your email address:'
                 }
               </p>
               <div style="background:#f8fafc;border:2px dashed #3b82f6;border-radius:16px;padding:24px;text-align:center;margin:0 0 24px 0;">
-                <div style="font-size:11px;text-transform:uppercase;font-weight:800;color:#2563eb;letter-spacing:1px;margin-bottom:8px;">Your One-Time Password (OTP)</div>
+                <div style="font-size:11px;text-transform:uppercase;font-weight:800;color:#2563eb;letter-spacing:1px;margin-bottom:8px;">Your 6-Digit Verification OTP</div>
                 <div style="font-family:'Courier New',Courier,monospace;font-size:36px;font-weight:900;letter-spacing:8px;color:#1e3a8a;">${escapeServerHtml(cleanOtp)}</div>
-                <div style="font-size:12px;font-weight:600;color:#64748b;margin-top:8px;">⏱️ Valid for 5 minutes</div>
+                <div style="font-size:12px;font-weight:600;color:#64748b;margin-top:8px;">Valid for 10 minutes</div>
               </div>
               <p style="font-size:12px;color:#94a3b8;line-height:1.5;border-top:1px solid #f1f5f9;padding-top:20px;margin:0;">
-                ⚠️ Never share this code with anyone. If you did not make this request, you can safely ignore this email.
+                Never share this OTP code with anyone. If you did not request this, you can safely ignore this email.
               </p>
             </div>
           </div>
         </body>
         </html>
       `;
+  }
 
-      const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
-        method: 'POST',
-        headers: {
-          accept: 'application/json',
-          'api-key': brevoApiKey,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          sender: { name: 'PixiForge Verification', email: senderEmail },
-          to: [{ email: cleanTo }],
-          subject,
-          htmlContent,
-        }),
+  async function dispatchTransactionalEmail(params: {
+    toEmail: string;
+    toName?: string;
+    replyTo?: { email: string; name?: string };
+    subject: string;
+    htmlContent: string;
+    senderName: string;
+  }): Promise<{ ok: boolean; status: number; messageId?: string; provider?: string; error?: string }> {
+    const { ADMIN_EMAIL, SUPPORT_EMAIL } = getPublicRuntimeEnv();
+    const smtpUser = (
+      process.env.SMTP_USER ||
+      process.env.GMAIL_USER ||
+      process.env.BREVO_SMTP_USER ||
+      ''
+    ).trim();
+    const smtpPass = (
+      process.env.SMTP_PASS ||
+      process.env.GMAIL_APP_PASSWORD ||
+      process.env.BREVO_SMTP_KEY ||
+      ''
+    ).trim();
+    const explicitSmtpHost = (process.env.SMTP_HOST || '').trim();
+    const smtpHost =
+      explicitSmtpHost ||
+      (smtpUser.toLowerCase().endsWith('@gmail.com') || process.env.GMAIL_APP_PASSWORD
+        ? 'smtp.gmail.com'
+        : process.env.BREVO_SMTP_KEY
+        ? 'smtp-relay.brevo.com'
+        : '');
+    const smtpPort = Number(process.env.SMTP_PORT) || (smtpHost === 'smtp.gmail.com' ? 465 : 587);
+    const smtpSecure =
+      process.env.SMTP_SECURE !== undefined
+        ? process.env.SMTP_SECURE === 'true'
+        : smtpPort === 465;
+
+    const brevoApiKey = (process.env.BREVO_API_KEY || process.env.VITE_BREVO_API_KEY || '').trim();
+    const resendApiKey = (process.env.RESEND_API_KEY || '').trim();
+    const configuredSender = (
+      process.env.SENDER_EMAIL ||
+      process.env.VITE_SENDER_EMAIL ||
+      smtpUser ||
+      SUPPORT_EMAIL ||
+      ADMIN_EMAIL
+    ).trim();
+
+    const errors: string[] = [];
+
+    // 1. Try Nodemailer SMTP (Gmail App Password / Brevo SMTP Relay / Custom SMTP)
+    if (smtpHost && smtpUser && smtpPass) {
+      try {
+        const transporter = nodemailer.createTransport({
+          host: smtpHost,
+          port: smtpPort,
+          secure: smtpSecure,
+          auth: {
+            user: smtpUser,
+            pass: smtpPass,
+          },
+          connectionTimeout: 10000,
+          greetingTimeout: 10000,
+          socketTimeout: 12000,
+        });
+        const fromAddress = configuredSender || smtpUser;
+        const info = await transporter.sendMail({
+          from: `"${params.senderName}" <${fromAddress}>`,
+          to: params.toName ? `"${params.toName}" <${params.toEmail}>` : params.toEmail,
+          ...(params.replyTo?.email
+            ? {
+                replyTo: params.replyTo.name
+                  ? `"${params.replyTo.name}" <${params.replyTo.email}>`
+                  : params.replyTo.email,
+              }
+            : {}),
+          subject: params.subject,
+          html: params.htmlContent,
+        });
+        return {
+          ok: true,
+          status: 200,
+          messageId: info.messageId,
+          provider: 'smtp',
+        };
+      } catch (err: any) {
+        errors.push(`SMTP: ${err?.message || 'Failed connecting to SMTP server'}`);
+      }
+    }
+
+    // 2. Try Brevo REST API
+    if (brevoApiKey && configuredSender) {
+      try {
+        const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
+          method: 'POST',
+          headers: {
+            accept: 'application/json',
+            'api-key': brevoApiKey,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            sender: { name: params.senderName, email: configuredSender },
+            to: [{ email: params.toEmail, ...(params.toName ? { name: params.toName } : {}) }],
+            ...(params.replyTo?.email
+              ? { replyTo: { email: params.replyTo.email, name: params.replyTo.name || params.replyTo.email } }
+              : {}),
+            subject: params.subject,
+            htmlContent: params.htmlContent,
+          }),
+        });
+        const data = (await brevoRes.json().catch(() => ({}))) as any;
+        if (brevoRes.ok) {
+          return {
+            ok: true,
+            status: 200,
+            messageId: data.messageId,
+            provider: 'brevo',
+          };
+        }
+        const msg = String(data?.message || `Brevo status ${brevoRes.status}`);
+        if (msg.includes('unrecognised IP') || msg.includes('authorised_ips')) {
+          errors.push(
+            'Brevo API blocked this server IP (Authorised IPs enabled in Brevo). Disable Authorised IPs in Brevo security settings or configure SMTP_USER + SMTP_PASS.'
+          );
+        } else {
+          errors.push(`Brevo: ${msg}`);
+        }
+      } catch (err: any) {
+        errors.push(`Brevo: ${err?.message || 'Network error'}`);
+      }
+    }
+
+    // 3. Try Resend REST API
+    if (resendApiKey) {
+      try {
+        const fromAddress = configuredSender || 'onboarding@resend.dev';
+        const resendRes = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${resendApiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: `${params.senderName} <${fromAddress}>`,
+            to: [params.toEmail],
+            ...(params.replyTo?.email ? { reply_to: params.replyTo.email } : {}),
+            subject: params.subject,
+            html: params.htmlContent,
+          }),
+        });
+        const data = (await resendRes.json().catch(() => ({}))) as any;
+        if (resendRes.ok) {
+          return {
+            ok: true,
+            status: 200,
+            messageId: data.id,
+            provider: 'resend',
+          };
+        }
+        errors.push(`Resend: ${data?.message || data?.error || `Status ${resendRes.status}`}`);
+      } catch (err: any) {
+        errors.push(`Resend: ${err?.message || 'Network error'}`);
+      }
+    }
+
+    if (errors.length === 0) {
+      return {
+        ok: false,
+        status: 400,
+        error:
+          'Email service is not configured on the server. Set SMTP_USER + SMTP_PASS (e.g. Gmail App Password) OR BREVO_API_KEY + SENDER_EMAIL in environment variables.',
+      };
+    }
+
+    return {
+      ok: false,
+      status: 422,
+      error: errors.join(' | '),
+    };
+  }
+
+  // Server-generated OTP email delivery (New Account & Forgot Password - strictly 6-digit OTP, never a link)
+  app.post('/api/auth/request-otp', async (req, res) => {
+    try {
+      const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
+      const purpose = req.body?.purpose === 'forgot' ? 'forgot' : req.body?.purpose === 'signup' ? 'signup' : null;
+
+      if (!EMAIL_REGEX.test(cleanEmail) || cleanEmail.length > 150) {
+        return res.status(400).json({ success: false, error: 'Please enter a valid email address.' });
+      }
+      if (!purpose) {
+        return res.status(400).json({ success: false, error: 'Invalid OTP purpose.' });
+      }
+
+      if (purpose === 'signup') {
+        const accounts = loadServerAuthAccounts();
+        if (accounts.some((a) => a.email === cleanEmail)) {
+          return res.status(409).json({
+            success: false,
+            error: 'An account with this email already exists. Please Sign In or use Forgot Password.',
+          });
+        }
+      }
+
+      const key = `${purpose}:${cleanEmail}`;
+      const now = Date.now();
+      const existing = otpChallengeMap.get(key);
+      if (existing && now - existing.lastSentAt < 30_000) {
+        const waitSec = Math.ceil((30_000 - (now - existing.lastSentAt)) / 1000);
+        return res.status(429).json({
+          success: false,
+          error: `Please wait ${waitSec}s before requesting another OTP.`,
+        });
+      }
+
+      const windowHistory = (otpRequestWindowMap.get(cleanEmail) || []).filter((ts) => now - ts < 15 * 60_000);
+      if (windowHistory.length >= 8) {
+        return res.status(429).json({
+          success: false,
+          error: 'Too many OTP requests. Please try again after 15 minutes.',
+        });
+      }
+
+      const otpCode = String(crypto.randomInt(100000, 1000000));
+      const subject =
+        purpose === 'forgot'
+          ? `PixiForge - Password Reset OTP: ${otpCode}`
+          : `PixiForge - Your 6-Digit Email Verification Code: ${otpCode}`;
+      const htmlContent = buildOtpEmailHtml(otpCode, purpose, subject);
+
+      const delivery = await dispatchTransactionalEmail({
+        toEmail: cleanEmail,
+        subject,
+        htmlContent,
+        senderName: 'PixiForge Verification',
       });
 
-      const data = (await brevoRes.json().catch(() => ({}))) as any;
-      if (brevoRes.ok) {
-        return res.json({ success: true, messageId: data.messageId });
+      if (!delivery.ok) {
+        return res.status(delivery.status).json({
+          success: false,
+          error: delivery.error || 'Failed to send OTP email.',
+        });
       }
-      return res.status(brevoRes.status).json({
+
+      otpChallengeMap.set(key, {
+        otpHash: hashOtpChallenge(cleanEmail, purpose, otpCode),
+        purpose,
+        expiresAt: now + 10 * 60_000,
+        attempts: 0,
+        lastSentAt: now,
+      });
+      otpRequestWindowMap.set(cleanEmail, [...windowHistory, now]);
+
+      return res.json({
+        success: true,
+        messageId: delivery.messageId,
+        provider: delivery.provider,
+        expiresInSeconds: 600,
+      });
+    } catch (err: any) {
+      return res.status(500).json({
         success: false,
-        error: data.message || `Email gateway error (Status ${brevoRes.status})`,
+        error: err?.message || 'Failed to generate and send OTP email.',
+      });
+    }
+  });
+
+  // Verify 6-digit OTP code on server and issue short-lived verification token
+  app.post('/api/auth/verify-otp', (req, res) => {
+    try {
+      const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
+      const cleanOtp = String(req.body?.otpCode || '').trim();
+      const purpose = req.body?.purpose === 'forgot' ? 'forgot' : req.body?.purpose === 'signup' ? 'signup' : null;
+
+      if (!EMAIL_REGEX.test(cleanEmail) || !/^\d{6}$/.test(cleanOtp) || !purpose) {
+        return res.status(400).json({ success: false, error: 'Valid email and 6-digit OTP code are required.' });
+      }
+
+      const key = `${purpose}:${cleanEmail}`;
+      const record = otpChallengeMap.get(key);
+      if (!record) {
+        return res.status(400).json({ success: false, error: 'OTP not found or already used. Please request a new OTP.' });
+      }
+
+      if (Date.now() > record.expiresAt) {
+        otpChallengeMap.delete(key);
+        return res.status(400).json({ success: false, error: 'OTP has expired. Please request a new OTP.' });
+      }
+
+      if (record.attempts >= 5) {
+        otpChallengeMap.delete(key);
+        return res.status(429).json({ success: false, error: 'Too many invalid OTP attempts. Please request a new OTP.' });
+      }
+
+      const expectedBuf = Buffer.from(record.otpHash, 'hex');
+      const actualBuf = Buffer.from(hashOtpChallenge(cleanEmail, purpose, cleanOtp), 'hex');
+      const isMatch = expectedBuf.length === actualBuf.length && crypto.timingSafeEqual(expectedBuf, actualBuf);
+
+      if (!isMatch) {
+        record.attempts += 1;
+        otpChallengeMap.set(key, record);
+        const remaining = Math.max(0, 5 - record.attempts);
+        return res.status(400).json({
+          success: false,
+          error:
+            remaining > 0
+              ? `Invalid OTP code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
+              : 'Too many invalid attempts. Please request a new OTP.',
+        });
+      }
+
+      otpChallengeMap.delete(key);
+      const verificationToken = crypto.randomBytes(24).toString('hex');
+      verifiedTokenMap.set(verificationToken, {
+        email: cleanEmail,
+        purpose,
+        expiresAt: Date.now() + 10 * 60_000,
+      });
+
+      return res.json({ success: true, verificationToken });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || 'OTP verification failed.' });
+    }
+  });
+
+  // Finalize Signup after OTP verification (stores scrypt-hashed credential on server)
+  app.post('/api/auth/complete-signup', (req, res) => {
+    try {
+      const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
+      const cleanName = String(req.body?.name || '').trim().slice(0, 100);
+      const cleanPassword = String(req.body?.password || '').trim();
+      const verificationToken = String(req.body?.verificationToken || '').trim();
+      const firebaseUid = String(req.body?.firebaseUid || '').trim();
+
+      if (!EMAIL_REGEX.test(cleanEmail) || cleanPassword.length < 6 || !verificationToken) {
+        return res.status(400).json({ success: false, error: 'Invalid signup payload.' });
+      }
+
+      const tokenRec = verifiedTokenMap.get(verificationToken);
+      if (!tokenRec || tokenRec.email !== cleanEmail || tokenRec.purpose !== 'signup' || Date.now() > tokenRec.expiresAt) {
+        return res.status(401).json({ success: false, error: 'OTP verification expired or invalid. Please verify OTP again.' });
+      }
+      verifiedTokenMap.delete(verificationToken);
+
+      const { hash, salt } = hashServerPassword(cleanPassword);
+      const now = new Date().toISOString();
+      const accounts = loadServerAuthAccounts();
+      const existingIdx = accounts.findIndex((a) => a.email === cleanEmail);
+      const record: ServerAuthAccount = {
+        id: firebaseUid || (existingIdx >= 0 ? accounts[existingIdx].id : `usr_${Date.now()}`),
+        name: cleanName || (existingIdx >= 0 ? accounts[existingIdx].name : cleanEmail.split('@')[0]) || 'User',
+        email: cleanEmail,
+        passwordHash: hash,
+        salt,
+        createdAt: existingIdx >= 0 ? accounts[existingIdx].createdAt : now,
+        updatedAt: now,
+      };
+      if (existingIdx >= 0) {
+        accounts[existingIdx] = record;
+      } else {
+        accounts.push(record);
+      }
+      saveServerAuthAccounts(accounts);
+
+      return res.json({
+        success: true,
+        user: { id: record.id, name: record.name, email: record.email },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || 'Failed to save account.' });
+    }
+  });
+
+  // Reset password using Forgot Password OTP verification token
+  app.post('/api/auth/reset-password', (req, res) => {
+    try {
+      const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
+      const newPassword = String(req.body?.newPassword || '').trim();
+      const verificationToken = String(req.body?.verificationToken || '').trim();
+
+      if (!EMAIL_REGEX.test(cleanEmail) || newPassword.length < 6 || !verificationToken) {
+        return res.status(400).json({ success: false, error: 'Valid email, 6+ character password, and OTP verification are required.' });
+      }
+
+      const tokenRec = verifiedTokenMap.get(verificationToken);
+      if (!tokenRec || tokenRec.email !== cleanEmail || tokenRec.purpose !== 'forgot' || Date.now() > tokenRec.expiresAt) {
+        return res.status(401).json({ success: false, error: 'OTP verification expired or invalid. Please verify OTP again.' });
+      }
+      verifiedTokenMap.delete(verificationToken);
+
+      const { hash, salt } = hashServerPassword(newPassword);
+      const now = new Date().toISOString();
+      const accounts = loadServerAuthAccounts();
+      const existingIdx = accounts.findIndex((a) => a.email === cleanEmail);
+      const record: ServerAuthAccount = {
+        id: existingIdx >= 0 ? accounts[existingIdx].id : `usr_${Date.now()}`,
+        name: existingIdx >= 0 ? accounts[existingIdx].name : cleanEmail.split('@')[0] || 'User',
+        email: cleanEmail,
+        passwordHash: hash,
+        salt,
+        createdAt: existingIdx >= 0 ? accounts[existingIdx].createdAt : now,
+        updatedAt: now,
+      };
+      if (existingIdx >= 0) {
+        accounts[existingIdx] = record;
+      } else {
+        accounts.push(record);
+      }
+      saveServerAuthAccounts(accounts);
+
+      return res.json({
+        success: true,
+        user: { id: record.id, name: record.name, email: record.email },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || 'Failed to reset password.' });
+    }
+  });
+
+  // Verify email + password against server scrypt hash (handles logins after OTP password reset across devices)
+  app.post('/api/auth/login-verify', (req, res) => {
+    try {
+      const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
+      const cleanPassword = String(req.body?.password || '').trim();
+      if (!EMAIL_REGEX.test(cleanEmail) || !cleanPassword) {
+        return res.status(400).json({ success: false, error: 'Email and password are required.' });
+      }
+
+      const accounts = loadServerAuthAccounts();
+      const account = accounts.find((a) => a.email === cleanEmail);
+      if (!account || !verifyServerPassword(cleanPassword, account.passwordHash, account.salt)) {
+        return res.status(401).json({ success: false, error: 'Incorrect email or password.' });
+      }
+
+      return res.json({
+        success: true,
+        user: {
+          id: account.id,
+          name: account.name,
+          email: account.email,
+          createdAt: account.createdAt,
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || 'Login verification failed.' });
+    }
+  });
+
+  // Sync Firebase-authenticated account hash to server after validating the caller's Firebase ID token
+  app.post('/api/auth/sync-firebase-login', async (req, res) => {
+    try {
+      const idToken = String(req.body?.idToken || '').trim();
+      const cleanPassword = String(req.body?.password || '').trim();
+      const cleanName = String(req.body?.name || '').trim().slice(0, 100);
+      const apiKey = getFirebaseWebApiKey();
+      if (!idToken || !apiKey || cleanPassword.length < 6) {
+        return res.status(400).json({ success: false });
+      }
+
+      const lookupRes = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+        }
+      );
+      if (!lookupRes.ok) {
+        return res.status(401).json({ success: false });
+      }
+      const lookupData = (await lookupRes.json().catch(() => ({}))) as any;
+      const fbUser = lookupData?.users?.[0];
+      const cleanEmail = String(fbUser?.email || '').trim().toLowerCase();
+      const firebaseUid = String(fbUser?.localId || '').trim();
+      if (!cleanEmail || !firebaseUid) {
+        return res.status(401).json({ success: false });
+      }
+
+      const { hash, salt } = hashServerPassword(cleanPassword);
+      const now = new Date().toISOString();
+      const accounts = loadServerAuthAccounts();
+      const existingIdx = accounts.findIndex((a) => a.email === cleanEmail);
+      const record: ServerAuthAccount = {
+        id: firebaseUid,
+        name: cleanName || (existingIdx >= 0 ? accounts[existingIdx].name : cleanEmail.split('@')[0]) || 'User',
+        email: cleanEmail,
+        passwordHash: hash,
+        salt,
+        createdAt: existingIdx >= 0 ? accounts[existingIdx].createdAt : now,
+        updatedAt: now,
+      };
+      if (existingIdx >= 0) {
+        accounts[existingIdx] = record;
+      } else {
+        accounts.push(record);
+      }
+      saveServerAuthAccounts(accounts);
+      return res.json({ success: true });
+    } catch {
+      return res.status(500).json({ success: false });
+    }
+  });
+
+  // Legacy direct OTP email endpoint backed by unified transactional dispatcher
+  app.post('/api/email/send-otp', async (req, res) => {
+    try {
+      const { toEmail, otpCode, purpose } = req.body || {};
+      const cleanTo = String(toEmail || '').trim();
+      const cleanOtp = String(otpCode || '').trim();
+      if (!cleanTo || !EMAIL_REGEX.test(cleanTo) || !/^\d{6}$/.test(cleanOtp)) {
+        return res.status(400).json({ success: false, error: 'Valid recipient email and 6-digit OTP code are required.' });
+      }
+
+      const normalizedPurpose: 'signup' | 'forgot' = purpose === 'forgot' ? 'forgot' : 'signup';
+      const subject =
+        normalizedPurpose === 'forgot'
+          ? `PixiForge - Password Reset OTP: ${cleanOtp}`
+          : `PixiForge - Your 6-Digit Email Verification Code: ${cleanOtp}`;
+      const htmlContent = buildOtpEmailHtml(cleanOtp, normalizedPurpose, subject);
+
+      const delivery = await dispatchTransactionalEmail({
+        toEmail: cleanTo,
+        subject,
+        htmlContent,
+        senderName: 'PixiForge Verification',
+      });
+
+      if (delivery.ok) {
+        return res.json({ success: true, messageId: delivery.messageId, provider: delivery.provider });
+      }
+      return res.status(delivery.status).json({
+        success: false,
+        error: delivery.error || 'Failed to dispatch OTP email',
       });
     } catch (err: any) {
       return res.status(500).json({
@@ -859,30 +1433,17 @@ async function startServer() {
     }
   });
 
-  // Server-side Help complaint email delivery via Brevo to configured SUPPORT_EMAIL / ADMIN_EMAIL
+  // Server-side Help complaint email delivery to configured SUPPORT_EMAIL / ADMIN_EMAIL
   app.post('/api/email/send-complaint', async (req, res) => {
     try {
       const { ticketId, name, email, phone, category, subject, message, userPlan } = req.body || {};
-      const brevoApiKey = (process.env.BREVO_API_KEY || process.env.VITE_BREVO_API_KEY || '').trim();
       const { ADMIN_EMAIL, SUPPORT_EMAIL } = getPublicRuntimeEnv();
       const targetEmail = (SUPPORT_EMAIL || ADMIN_EMAIL).trim();
-      const senderEmail = (
-        process.env.SENDER_EMAIL ||
-        process.env.VITE_SENDER_EMAIL ||
-        targetEmail
-      ).trim();
 
       if (!targetEmail) {
-        return res.status(503).json({
+        return res.status(400).json({
           success: false,
           error: 'Support email is not configured in environment variables (SUPPORT_EMAIL / ADMIN_EMAIL).',
-        });
-      }
-
-      if (!brevoApiKey) {
-        return res.status(503).json({
-          success: false,
-          error: `Email gateway API key is not configured. Use "Send via Gmail" below to email ${targetEmail} directly.`,
         });
       }
 
@@ -929,29 +1490,21 @@ async function startServer() {
         </html>
       `;
 
-      const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
-        method: 'POST',
-        headers: {
-          accept: 'application/json',
-          'api-key': brevoApiKey,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          sender: { name: 'PixiForge Support Desk', email: senderEmail },
-          to: [{ email: targetEmail, name: 'PixiForge Support' }],
-          replyTo: { email: String(email || '').trim(), name: String(name || '').trim() },
-          subject: emailSubject,
-          htmlContent,
-        }),
+      const delivery = await dispatchTransactionalEmail({
+        toEmail: targetEmail,
+        toName: 'PixiForge Support',
+        replyTo: { email: String(email || '').trim(), name: String(name || '').trim() },
+        subject: emailSubject,
+        htmlContent,
+        senderName: 'PixiForge Support Desk',
       });
 
-      const data = (await brevoRes.json().catch(() => ({}))) as any;
-      if (brevoRes.ok) {
-        return res.json({ success: true, messageId: data.messageId });
+      if (delivery.ok) {
+        return res.json({ success: true, messageId: delivery.messageId, provider: delivery.provider });
       }
-      return res.status(brevoRes.status).json({
+      return res.status(delivery.status).json({
         success: false,
-        error: data.message || `Email gateway error (Status ${brevoRes.status})`,
+        error: delivery.error || `Use "Send via Gmail" below to email ${targetEmail} directly.`,
       });
     } catch (err: any) {
       return res.status(500).json({
