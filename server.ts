@@ -501,7 +501,14 @@ async function resolveAdministrativeLocation(params: {
 
 async function startServer() {
   const app = express();
-  app.use(express.json());
+  app.use(
+    express.json({
+      verify: (req: any, _res, buf) => {
+        req.rawBody = buf;
+      },
+    })
+  );
+  app.use(express.urlencoded({ extended: true }));
 
   // Health check endpoint
   app.get('/api/health', (_req, res) => {
@@ -1844,6 +1851,8 @@ async function startServer() {
           });
         }
 
+        markServerPaymentRefunded(paymentId);
+
         return res.json({
           success: true,
           mode: 'razorpay_api',
@@ -1875,6 +1884,233 @@ async function startServer() {
     }
   });
 
+  // Durable Server-Side Razorpay Payment & Webhook Ledger (survives low-RAM mobile browser refreshes & app kills)
+  type ValidPlan = 'pro' | 'max' | 'ultra';
+  type ValidCycle = 'monthly' | '3months' | '6months' | 'yearly';
+
+  interface VerifiedPaymentEntry {
+    paymentId: string;
+    orderId?: string;
+    subscriptionId?: string;
+    plan: ValidPlan;
+    billingCycle: ValidCycle;
+    amount: number;
+    currency: string;
+    autoPay: boolean;
+    autoPayStatus: 'active' | 'pending_mandate' | 'off';
+    userId?: string;
+    userEmail?: string;
+    method?: string;
+    status: 'captured' | 'authorized' | 'refunded';
+    source: 'webhook' | 'verify' | 'reconcile' | 'callback';
+    createdAt: string;
+    updatedAt: string;
+  }
+
+  interface PendingCheckoutEntry {
+    checkoutId: string;
+    orderId?: string;
+    subscriptionId?: string;
+    plan: ValidPlan;
+    billingCycle: ValidCycle;
+    amount: number;
+    currency: string;
+    autoPay: boolean;
+    userId?: string;
+    userEmail?: string;
+    createdAt: string;
+  }
+
+  const PAYMENTS_LEDGER_PATH = path.join(os.tmpdir(), 'pixiforge-payments-ledger.json');
+
+  function normalizeValidPlan(raw: unknown): ValidPlan {
+    const p = String(raw || '').trim().toLowerCase();
+    if (p === 'max' || p === 'ultra' || p === 'pro') return p;
+    return 'pro';
+  }
+
+  function normalizeValidCycle(raw: unknown): ValidCycle {
+    const c = String(raw || '').trim().toLowerCase();
+    if (c === '3months' || c === '6months' || c === 'yearly' || c === 'monthly') return c;
+    return 'monthly';
+  }
+
+  function fromRazorpayMinorUnits(minorAmount: number, currencyCode: string): number {
+    const cfg = getCurrencyConfig(currencyCode || 'INR');
+    const numeric = Number(minorAmount) || 0;
+    if (cfg.decimals === 0) return Math.round(numeric);
+    if (cfg.decimals === 3) return Number((numeric / 1000).toFixed(3));
+    return Number((numeric / 100).toFixed(2));
+  }
+
+  function loadPaymentLedger(): {
+    verifiedPayments: VerifiedPaymentEntry[];
+    pendingCheckouts: PendingCheckoutEntry[];
+  } {
+    try {
+      if (fs.existsSync(PAYMENTS_LEDGER_PATH)) {
+        const raw = fs.readFileSync(PAYMENTS_LEDGER_PATH, 'utf8');
+        const parsed = JSON.parse(raw);
+        return {
+          verifiedPayments: Array.isArray(parsed?.verifiedPayments) ? parsed.verifiedPayments : [],
+          pendingCheckouts: Array.isArray(parsed?.pendingCheckouts) ? parsed.pendingCheckouts : [],
+        };
+      }
+    } catch (err) {
+      console.warn('[PaymentLedger] Load notice:', err);
+    }
+    return { verifiedPayments: [], pendingCheckouts: [] };
+  }
+
+  function savePaymentLedger(ledger: {
+    verifiedPayments: VerifiedPaymentEntry[];
+    pendingCheckouts: PendingCheckoutEntry[];
+  }) {
+    try {
+      const trimmed = {
+        verifiedPayments: ledger.verifiedPayments.slice(0, 5000),
+        pendingCheckouts: ledger.pendingCheckouts.slice(0, 2000),
+      };
+      fs.writeFileSync(PAYMENTS_LEDGER_PATH, JSON.stringify(trimmed), 'utf8');
+    } catch (err) {
+      console.warn('[PaymentLedger] Save notice:', err);
+    }
+  }
+
+  function findPendingCheckout(params: {
+    orderId?: string;
+    subscriptionId?: string;
+    checkoutId?: string;
+    userId?: string;
+    userEmail?: string;
+  }): PendingCheckoutEntry | undefined {
+    const ledger = loadPaymentLedger();
+    const cleanEmail = params.userEmail?.trim().toLowerCase();
+    return ledger.pendingCheckouts.find(
+      (c) =>
+        (params.checkoutId && c.checkoutId === params.checkoutId) ||
+        (params.orderId && c.orderId === params.orderId) ||
+        (params.subscriptionId && c.subscriptionId === params.subscriptionId) ||
+        (!params.orderId &&
+          !params.subscriptionId &&
+          ((params.userId && c.userId === params.userId) ||
+            (cleanEmail && c.userEmail === cleanEmail)))
+    );
+  }
+
+  function recordPendingCheckout(entry: Omit<PendingCheckoutEntry, 'createdAt'>): PendingCheckoutEntry {
+    const ledger = loadPaymentLedger();
+    const record: PendingCheckoutEntry = {
+      ...entry,
+      userEmail: entry.userEmail?.trim().toLowerCase() || undefined,
+      createdAt: new Date().toISOString(),
+    };
+    ledger.pendingCheckouts = [
+      record,
+      ...ledger.pendingCheckouts.filter(
+        (c) =>
+          c.checkoutId !== record.checkoutId &&
+          (!record.orderId || c.orderId !== record.orderId) &&
+          (!record.subscriptionId || c.subscriptionId !== record.subscriptionId)
+      ),
+    ].slice(0, 2000);
+    savePaymentLedger(ledger);
+    return record;
+  }
+
+  function removeMatchingPendingCheckout(params: {
+    orderId?: string;
+    subscriptionId?: string;
+    checkoutId?: string;
+  }) {
+    if (!params.orderId && !params.subscriptionId && !params.checkoutId) return;
+    const ledger = loadPaymentLedger();
+    ledger.pendingCheckouts = ledger.pendingCheckouts.filter(
+      (c) =>
+        !(
+          (params.checkoutId && c.checkoutId === params.checkoutId) ||
+          (params.orderId && c.orderId === params.orderId) ||
+          (params.subscriptionId && c.subscriptionId === params.subscriptionId)
+        )
+    );
+    savePaymentLedger(ledger);
+  }
+
+  function markServerPaymentRefunded(paymentId?: string, subscriptionId?: string) {
+    if (!paymentId && !subscriptionId) return;
+    const ledger = loadPaymentLedger();
+    let changed = false;
+    ledger.verifiedPayments = ledger.verifiedPayments.map((p) => {
+      if (
+        (paymentId && p.paymentId === paymentId) ||
+        (subscriptionId && p.subscriptionId === subscriptionId)
+      ) {
+        changed = true;
+        return { ...p, status: 'refunded', updatedAt: new Date().toISOString() };
+      }
+      return p;
+    });
+    if (changed) {
+      savePaymentLedger(ledger);
+    }
+  }
+
+  function upsertVerifiedPayment(
+    entry: Omit<VerifiedPaymentEntry, 'createdAt' | 'updatedAt'> & { createdAt?: string }
+  ): VerifiedPaymentEntry {
+    const ledger = loadPaymentLedger();
+    const now = new Date().toISOString();
+    const cleanEmail = entry.userEmail?.trim().toLowerCase() || undefined;
+
+    // Upgrade existing subscription placeholder (e.g. sub_...) when real pay_... arrives
+    let existingIdx = ledger.verifiedPayments.findIndex((p) => p.paymentId === entry.paymentId);
+    if (existingIdx === -1 && entry.subscriptionId && entry.paymentId.startsWith('pay_')) {
+      existingIdx = ledger.verifiedPayments.findIndex(
+        (p) => p.subscriptionId === entry.subscriptionId && p.paymentId === entry.subscriptionId
+      );
+    }
+
+    const existing = existingIdx >= 0 ? ledger.verifiedPayments[existingIdx] : undefined;
+    const finalStatus: VerifiedPaymentEntry['status'] =
+      existing?.status === 'refunded' ? 'refunded' : entry.status;
+
+    const merged: VerifiedPaymentEntry = {
+      paymentId: entry.paymentId,
+      orderId: entry.orderId || existing?.orderId,
+      subscriptionId: entry.subscriptionId || existing?.subscriptionId,
+      plan: entry.plan || existing?.plan || 'pro',
+      billingCycle: entry.billingCycle || existing?.billingCycle || 'monthly',
+      amount: Number(entry.amount) > 0 ? Number(entry.amount) : existing?.amount || 0,
+      currency: getCurrencyConfig(entry.currency || existing?.currency || 'INR').code,
+      autoPay: Boolean(entry.autoPay || entry.subscriptionId || existing?.autoPay),
+      autoPayStatus:
+        entry.autoPayStatus ||
+        (entry.autoPay || entry.subscriptionId ? 'active' : existing?.autoPayStatus || 'off'),
+      userId: entry.userId || existing?.userId,
+      userEmail: cleanEmail || existing?.userEmail,
+      method: entry.method || existing?.method,
+      status: finalStatus,
+      source: entry.source,
+      createdAt: entry.createdAt || existing?.createdAt || now,
+      updatedAt: now,
+    };
+
+    if (existingIdx >= 0) {
+      ledger.verifiedPayments[existingIdx] = merged;
+    } else {
+      ledger.verifiedPayments.unshift(merged);
+    }
+    ledger.pendingCheckouts = ledger.pendingCheckouts.filter(
+      (c) =>
+        !(
+          (merged.orderId && c.orderId === merged.orderId) ||
+          (merged.subscriptionId && c.subscriptionId === merged.subscriptionId)
+        )
+    );
+    savePaymentLedger(ledger);
+    return merged;
+  }
+
   // Cache created Razorpay Plan IDs per key/tier/cycle/amount to avoid duplicate plan creation on every checkout
   const cachedRazorpayPlans = new Map<string, string>();
 
@@ -1892,6 +2128,7 @@ async function startServer() {
         });
       }
 
+      const checkoutId = `chk_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
       const keyId = process.env.RAZORPAY_KEY_ID || process.env.VITE_RAZORPAY_KEY_ID || '';
       const keySecret = process.env.RAZORPAY_KEY_SECRET || '';
       const hasValidLiveCreds =
@@ -1900,9 +2137,20 @@ async function startServer() {
         keyId !== 'rzp_test_1DP5mmOlF5G5ag';
 
       if (!hasValidLiveCreds) {
+        recordPendingCheckout({
+          checkoutId,
+          plan: normalizeValidPlan(plan),
+          billingCycle: normalizeValidCycle(billingCycle),
+          amount: numericAmount,
+          currency: currencyCfg.code,
+          autoPay: false,
+          userId: userId ? String(userId) : undefined,
+          userEmail: userEmail ? String(userEmail) : undefined,
+        });
         return res.json({
           success: true,
           mode: 'client_direct_checkout',
+          checkoutId,
           orderId: null,
           currency: currencyCfg.code,
           keyId: keyId || undefined,
@@ -1938,9 +2186,20 @@ async function startServer() {
 
       const orderData = (await orderRes.json().catch(() => ({}))) as any;
       if (!orderRes.ok || !orderData?.id) {
+        recordPendingCheckout({
+          checkoutId,
+          plan: normalizeValidPlan(plan),
+          billingCycle: normalizeValidCycle(billingCycle),
+          amount: numericAmount,
+          currency: currencyCfg.code,
+          autoPay: false,
+          userId: userId ? String(userId) : undefined,
+          userEmail: userEmail ? String(userEmail) : undefined,
+        });
         return res.json({
           success: true,
           mode: 'client_direct_checkout',
+          checkoutId,
           orderId: null,
           currency: currencyCfg.code,
           keyId,
@@ -1948,9 +2207,22 @@ async function startServer() {
         });
       }
 
+      recordPendingCheckout({
+        checkoutId,
+        orderId: orderData.id,
+        plan: normalizeValidPlan(plan),
+        billingCycle: normalizeValidCycle(billingCycle),
+        amount: numericAmount,
+        currency: currencyCfg.code,
+        autoPay: false,
+        userId: userId ? String(userId) : undefined,
+        userEmail: userEmail ? String(userEmail) : undefined,
+      });
+
       return res.json({
         success: true,
         mode: 'razorpay_order',
+        checkoutId,
         orderId: orderData.id,
         amount: orderData.amount,
         currency: orderData.currency || currencyCfg.code,
@@ -1974,6 +2246,13 @@ async function startServer() {
         razorpay_order_id,
         razorpay_subscription_id,
         razorpay_signature,
+        plan,
+        billingCycle,
+        amount,
+        currency,
+        autoPay,
+        userId,
+        userEmail,
       } = req.body || {};
 
       if (!razorpay_payment_id) {
@@ -1991,7 +2270,40 @@ async function startServer() {
         Boolean(keyId) &&
         keyId !== 'rzp_test_1DP5mmOlF5G5ag';
 
+      const pendingMeta = findPendingCheckout({
+        orderId: razorpay_order_id ? String(razorpay_order_id) : undefined,
+        subscriptionId: razorpay_subscription_id ? String(razorpay_subscription_id) : undefined,
+        userId: userId ? String(userId) : undefined,
+        userEmail: userEmail ? String(userEmail) : undefined,
+      });
+
+      const persistVerified = (source: VerifiedPaymentEntry['source']) => {
+        upsertVerifiedPayment({
+          paymentId: String(razorpay_payment_id),
+          orderId: razorpay_order_id ? String(razorpay_order_id) : pendingMeta?.orderId,
+          subscriptionId: razorpay_subscription_id
+            ? String(razorpay_subscription_id)
+            : pendingMeta?.subscriptionId,
+          plan: normalizeValidPlan(plan || pendingMeta?.plan),
+          billingCycle: normalizeValidCycle(billingCycle || pendingMeta?.billingCycle),
+          amount: Number(amount) || pendingMeta?.amount || 0,
+          currency: String(currency || pendingMeta?.currency || 'INR'),
+          autoPay: Boolean(autoPay ?? pendingMeta?.autoPay ?? razorpay_subscription_id),
+          autoPayStatus:
+            Boolean(autoPay ?? pendingMeta?.autoPay ?? razorpay_subscription_id)
+              ? razorpay_subscription_id || pendingMeta?.subscriptionId
+                ? 'active'
+                : 'pending_mandate'
+              : 'off',
+          userId: userId ? String(userId) : pendingMeta?.userId,
+          userEmail: userEmail ? String(userEmail) : pendingMeta?.userEmail,
+          status: 'captured',
+          source,
+        });
+      };
+
       if (!hasValidSecret || !razorpay_signature) {
+        persistVerified('verify');
         return res.json({
           success: true,
           verified: true,
@@ -2005,6 +2317,7 @@ async function startServer() {
       } else if (razorpay_order_id) {
         payloadString = `${razorpay_order_id}|${razorpay_payment_id}`;
       } else {
+        persistVerified('verify');
         return res.json({
           success: true,
           verified: true,
@@ -2030,6 +2343,8 @@ async function startServer() {
           error: 'Payment signature verification failed. Please contact support if amount was debited.',
         });
       }
+
+      persistVerified('verify');
 
       return res.json({
         success: true,
@@ -2060,6 +2375,7 @@ async function startServer() {
         });
       }
 
+      const checkoutId = `chk_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
       const keyId = process.env.RAZORPAY_KEY_ID || process.env.VITE_RAZORPAY_KEY_ID || '';
       const keySecret = process.env.RAZORPAY_KEY_SECRET || '';
       const hasValidLiveCreds =
@@ -2072,6 +2388,7 @@ async function startServer() {
         return res.json({
           success: true,
           mode: 'low_amount_one_time_guard',
+          checkoutId,
           subscriptionId: null,
           keyId: hasValidLiveCreds ? keyId : undefined,
           warning: `AutoPay mandate requires at least ${currencyCfg.symbol}${currencyCfg.minAutoPayAmount}; proceeding with standard One-Time Payment.`,
@@ -2079,9 +2396,20 @@ async function startServer() {
       }
 
       if (!hasValidLiveCreds) {
+        recordPendingCheckout({
+          checkoutId,
+          plan: normalizeValidPlan(plan),
+          billingCycle: normalizeValidCycle(billingCycle),
+          amount: numericAmount,
+          currency: currencyCfg.code,
+          autoPay: true,
+          userId: userId ? String(userId) : undefined,
+          userEmail: userEmail ? String(userEmail) : undefined,
+        });
         return res.json({
           success: true,
           mode: 'checkout_with_autopay_preference',
+          checkoutId,
           subscriptionId: null,
         });
       }
@@ -2129,6 +2457,7 @@ async function startServer() {
           return res.json({
             success: true,
             mode: 'checkout_with_autopay_preference',
+            checkoutId,
             subscriptionId: null,
             keyId,
             warning: planData?.error?.description || 'Razorpay Plan creation skipped; using standard checkout.',
@@ -2166,15 +2495,29 @@ async function startServer() {
         return res.json({
           success: true,
           mode: 'checkout_with_autopay_preference',
+          checkoutId,
           subscriptionId: null,
           keyId,
           warning: subData?.error?.description || 'Razorpay Subscription creation skipped.',
         });
       }
 
+      recordPendingCheckout({
+        checkoutId,
+        subscriptionId: subData.id,
+        plan: normalizeValidPlan(plan),
+        billingCycle: normalizeValidCycle(billingCycle),
+        amount: numericAmount,
+        currency: currencyCfg.code,
+        autoPay: true,
+        userId: userId ? String(userId) : undefined,
+        userEmail: userEmail ? String(userEmail) : undefined,
+      });
+
       return res.json({
         success: true,
         mode: 'razorpay_subscription',
+        checkoutId,
         subscriptionId: subData.id,
         planId: razorpayPlanId,
         currency: currencyCfg.code,
@@ -2187,6 +2530,541 @@ async function startServer() {
         mode: 'checkout_with_autopay_preference',
         subscriptionId: null,
       });
+    }
+  });
+
+  // Authoritative Razorpay Webhook Listener (handles GPay, PhonePe, Paytm, all UPI & Card events even when low-RAM phone kills browser tab)
+  const handleRazorpayWebhook = async (req: any, res: express.Response) => {
+    try {
+      const signature = String(req.headers['x-razorpay-signature'] || '').trim();
+      const webhookSecret = (process.env.RAZORPAY_WEBHOOK_SECRET || '').trim();
+      const rawBodyBuf: Buffer = Buffer.isBuffer(req.rawBody)
+        ? req.rawBody
+        : Buffer.from(JSON.stringify(req.body || {}), 'utf8');
+
+      const keyId = process.env.RAZORPAY_KEY_ID || process.env.VITE_RAZORPAY_KEY_ID || '';
+      const keySecret = process.env.RAZORPAY_KEY_SECRET || '';
+      const hasValidLiveCreds =
+        Boolean(keyId) && Boolean(keySecret) && keyId !== 'rzp_test_1DP5mmOlF5G5ag';
+
+      if (webhookSecret) {
+        if (!signature) {
+          return res.status(400).json({ success: false, error: 'Missing webhook signature.' });
+        }
+        const expected = crypto
+          .createHmac('sha256', webhookSecret)
+          .update(rawBodyBuf)
+          .digest('hex');
+        const sigBuf = Buffer.from(signature, 'utf8');
+        const expBuf = Buffer.from(expected, 'utf8');
+        if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+          return res.status(400).json({ success: false, error: 'Invalid webhook signature.' });
+        }
+      } else if (!hasValidLiveCreds) {
+        return res.status(400).json({
+          success: false,
+          error: 'Configure RAZORPAY_WEBHOOK_SECRET or RAZORPAY_KEY_SECRET to verify webhooks.',
+        });
+      }
+
+      const body = req.body || {};
+      const event = String(body.event || '').trim();
+      const paymentEntity = body.payload?.payment?.entity;
+      const orderEntity = body.payload?.order?.entity;
+      const subEntity = body.payload?.subscription?.entity;
+      const refundEntity = body.payload?.refund?.entity;
+
+      if (event === 'refund.created' || event === 'refund.processed') {
+        const refPayId = refundEntity?.payment_id || paymentEntity?.id;
+        if (refPayId) {
+          markServerPaymentRefunded(String(refPayId));
+        }
+        return res.json({ status: 'ok' });
+      }
+
+      if (event === 'subscription.cancelled' || event === 'subscription.halted') {
+        if (subEntity?.id) {
+          markServerPaymentRefunded(undefined, String(subEntity.id));
+        }
+        return res.json({ status: 'ok' });
+      }
+
+      const relevantPaymentEvents = new Set([
+        'payment.captured',
+        'payment.authorized',
+        'order.paid',
+        'subscription.authenticated',
+        'subscription.activated',
+        'subscription.charged',
+      ]);
+
+      if (!relevantPaymentEvents.has(event)) {
+        return res.json({ status: 'ok', ignored: event || 'unknown' });
+      }
+
+      const paymentId = String(paymentEntity?.id || '');
+      const orderId = String(paymentEntity?.order_id || orderEntity?.id || '') || undefined;
+      const subscriptionId = String(subEntity?.id || paymentEntity?.subscription_id || '') || undefined;
+
+      // When RAZORPAY_WEBHOOK_SECRET isn't configured, verify the event entity directly with Razorpay REST API
+      let livePayment: any = paymentEntity || null;
+      let liveSub: any = subEntity || null;
+      if (!webhookSecret && hasValidLiveCreds) {
+        const authHeader = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+        if (paymentId) {
+          const pRes = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, {
+            headers: { Authorization: `Basic ${authHeader}` },
+          });
+          if (!pRes.ok) {
+            return res.status(400).json({ success: false, error: 'Unable to verify webhook payment via Razorpay API.' });
+          }
+          livePayment = await pRes.json().catch(() => null);
+          if (!livePayment || !['captured', 'authorized'].includes(String(livePayment.status))) {
+            return res.json({ status: 'ignored_unpaid' });
+          }
+        } else if (subscriptionId) {
+          const sRes = await fetch(`https://api.razorpay.com/v1/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+            headers: { Authorization: `Basic ${authHeader}` },
+          });
+          if (!sRes.ok) {
+            return res.status(400).json({ success: false, error: 'Unable to verify webhook subscription via Razorpay API.' });
+          }
+          liveSub = await sRes.json().catch(() => null);
+          if (!liveSub || !['active', 'authenticated'].includes(String(liveSub.status))) {
+            return res.json({ status: 'ignored_inactive_subscription' });
+          }
+        }
+      }
+
+      const mergedNotes = {
+        ...(orderEntity?.notes || {}),
+        ...(liveSub?.notes || {}),
+        ...(livePayment?.notes || {}),
+      };
+      const pendingMeta = findPendingCheckout({
+        orderId,
+        subscriptionId,
+        userId: mergedNotes.userId ? String(mergedNotes.userId) : undefined,
+        userEmail: mergedNotes.userEmail ? String(mergedNotes.userEmail) : livePayment?.email,
+      });
+
+      const resolvedCurrency = getCurrencyConfig(
+        String(livePayment?.currency || orderEntity?.currency || mergedNotes.currency || pendingMeta?.currency || 'INR')
+      ).code;
+      const minorAmount = Number(livePayment?.amount ?? orderEntity?.amount ?? 0);
+      const resolvedAmount =
+        minorAmount > 0
+          ? fromRazorpayMinorUnits(minorAmount, resolvedCurrency)
+          : pendingMeta?.amount || 0;
+
+      const resolvedPlan = normalizeValidPlan(mergedNotes.plan || pendingMeta?.plan);
+      const resolvedCycle = normalizeValidCycle(mergedNotes.billingCycle || pendingMeta?.billingCycle);
+      const resolvedUserId = String(mergedNotes.userId || pendingMeta?.userId || '').trim() || undefined;
+      const rawEmail = String(
+        mergedNotes.userEmail || livePayment?.email || pendingMeta?.userEmail || ''
+      )
+        .trim()
+        .toLowerCase();
+      const resolvedUserEmail = rawEmail && rawEmail.includes('@') ? rawEmail : undefined;
+      const isAutoPay =
+        Boolean(subscriptionId) ||
+        String(mergedNotes.autoPay || '').toLowerCase() === 'enabled' ||
+        Boolean(pendingMeta?.autoPay);
+
+      const effectivePaymentId = paymentId || subscriptionId;
+      if (effectivePaymentId) {
+        if (Number(livePayment?.amount_refunded || 0) > 0) {
+          markServerPaymentRefunded(effectivePaymentId, subscriptionId);
+          return res.json({ status: 'ok' });
+        }
+
+        upsertVerifiedPayment({
+          paymentId: effectivePaymentId,
+          orderId,
+          subscriptionId,
+          plan: resolvedPlan,
+          billingCycle: resolvedCycle,
+          amount: resolvedAmount,
+          currency: resolvedCurrency,
+          autoPay: isAutoPay,
+          autoPayStatus: isAutoPay ? 'active' : 'off',
+          userId: resolvedUserId,
+          userEmail: resolvedUserEmail,
+          method: livePayment?.method ? String(livePayment.method) : undefined,
+          status: livePayment?.status === 'authorized' ? 'authorized' : 'captured',
+          source: 'webhook',
+        });
+      }
+
+      return res.json({ status: 'ok' });
+    } catch (err: any) {
+      console.error('[/api/razorpay/webhook] Error:', err);
+      return res.status(500).json({ status: 'error', error: err?.message || 'Webhook processing error' });
+    }
+  };
+
+  app.post('/api/razorpay/webhook', handleRazorpayWebhook);
+  app.post('/api/webhook/razorpay', handleRazorpayWebhook);
+
+  // Razorpay Redirect Callback Handler (supports POST form callback_url & GET redirect from UPI/Bank/Subscription flows)
+  const handleRazorpayCallback = async (req: express.Request, res: express.Response) => {
+    try {
+      const src = req.method === 'POST' ? req.body || {} : req.query || {};
+      const paymentId = String(src.razorpay_payment_id || '').trim();
+      const orderId = String(src.razorpay_order_id || '').trim() || undefined;
+      const subscriptionId = String(src.razorpay_subscription_id || '').trim() || undefined;
+      const signature = String(src.razorpay_signature || '').trim();
+      const errDesc = String(src['error[description]'] || src.error_description || '').trim();
+
+      if (!paymentId) {
+        const failUrl = `/pricing?rzp_status=failed${errDesc ? `&rzp_error=${encodeURIComponent(errDesc)}` : ''}`;
+        return res.redirect(302, failUrl);
+      }
+
+      const keySecret = process.env.RAZORPAY_KEY_SECRET || '';
+      const keyId = process.env.RAZORPAY_KEY_ID || process.env.VITE_RAZORPAY_KEY_ID || '';
+      const hasValidSecret = Boolean(keySecret) && Boolean(keyId) && keyId !== 'rzp_test_1DP5mmOlF5G5ag';
+
+      if (hasValidSecret && signature) {
+        const payloadString = subscriptionId
+          ? `${paymentId}|${subscriptionId}`
+          : orderId
+          ? `${orderId}|${paymentId}`
+          : '';
+        if (payloadString) {
+          const expectedSig = crypto.createHmac('sha256', keySecret).update(payloadString).digest('hex');
+          const sigBuf = Buffer.from(signature, 'utf8');
+          const expBuf = Buffer.from(expectedSig, 'utf8');
+          if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+            return res.redirect(302, '/pricing?rzp_status=failed&rzp_error=Signature+verification+failed');
+          }
+        }
+      }
+
+      const pendingMeta = findPendingCheckout({ orderId, subscriptionId });
+      upsertVerifiedPayment({
+        paymentId,
+        orderId: orderId || pendingMeta?.orderId,
+        subscriptionId: subscriptionId || pendingMeta?.subscriptionId,
+        plan: pendingMeta?.plan || 'pro',
+        billingCycle: pendingMeta?.billingCycle || 'monthly',
+        amount: pendingMeta?.amount || 0,
+        currency: pendingMeta?.currency || 'INR',
+        autoPay: Boolean(subscriptionId || pendingMeta?.autoPay),
+        autoPayStatus: Boolean(subscriptionId || pendingMeta?.autoPay) ? 'active' : 'off',
+        userId: pendingMeta?.userId,
+        userEmail: pendingMeta?.userEmail,
+        status: 'captured',
+        source: 'callback',
+      });
+
+      const params = new URLSearchParams({
+        rzp_status: 'success',
+        rzp_payment_id: paymentId,
+      });
+      if (orderId) params.set('rzp_order_id', orderId);
+      if (subscriptionId) params.set('rzp_subscription_id', subscriptionId);
+      return res.redirect(302, `/pricing?${params.toString()}`);
+    } catch (err: any) {
+      console.error('[/api/razorpay/callback] Error:', err);
+      return res.redirect(302, '/pricing?rzp_status=recover');
+    }
+  };
+
+  app.post('/api/razorpay/callback', handleRazorpayCallback);
+  app.get('/api/razorpay/callback', handleRazorpayCallback);
+
+  // Authoritative Payment Recovery / Reconcile Endpoint (called after mobile browser reload, GPay switch-back, or checkout dismiss)
+  app.post('/api/payment/reconcile', async (req, res) => {
+    try {
+      const {
+        userId,
+        userEmail,
+        firebaseIdToken,
+        pendingOrderId,
+        pendingSubscriptionId,
+        pendingCheckoutId,
+        plan,
+        billingCycle,
+        amount,
+        currency,
+        autoPay,
+        startedAt,
+        knownPaymentIds,
+      } = req.body || {};
+
+      let cleanUserId = String(userId || '').trim();
+      let cleanEmail = String(userEmail || '').trim().toLowerCase();
+
+      // If caller supplies a Firebase ID token, prefer its server-verified UID/email
+      const fbApiKey = getFirebaseWebApiKey();
+      if (firebaseIdToken && fbApiKey) {
+        try {
+          const lookupRes = await fetch(
+            `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(fbApiKey)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ idToken: String(firebaseIdToken) }),
+            }
+          );
+          if (lookupRes.ok) {
+            const lookupData = (await lookupRes.json().catch(() => ({}))) as any;
+            const fbUser = lookupData?.users?.[0];
+            if (fbUser?.localId) cleanUserId = String(fbUser.localId).trim();
+            if (fbUser?.email) cleanEmail = String(fbUser.email).trim().toLowerCase();
+          }
+        } catch {
+          // Proceed with provided identifiers
+        }
+      }
+
+      const knownSet = new Set<string>(
+        Array.isArray(knownPaymentIds) ? knownPaymentIds.map((x: any) => String(x || '').trim()) : []
+      );
+      const orderIdStr = pendingOrderId ? String(pendingOrderId).trim() : '';
+      const subIdStr = pendingSubscriptionId ? String(pendingSubscriptionId).trim() : '';
+
+      if (!cleanUserId && !cleanEmail && !orderIdStr && !subIdStr) {
+        return res.json({ found: false, pendingProcessing: false });
+      }
+
+      const ledger = loadPaymentLedger();
+      const pendingMeta = findPendingCheckout({
+        orderId: orderIdStr || undefined,
+        subscriptionId: subIdStr || undefined,
+        checkoutId: pendingCheckoutId ? String(pendingCheckoutId).trim() : undefined,
+        userId: cleanUserId || undefined,
+        userEmail: cleanEmail || undefined,
+      });
+
+      const matchesCaller = (candidateUserId?: string, candidateEmail?: string, candidateOrderId?: string, candidateSubId?: string) => {
+        if (orderIdStr && candidateOrderId && candidateOrderId === orderIdStr) return true;
+        if (subIdStr && candidateSubId && candidateSubId === subIdStr) return true;
+        if (cleanUserId && candidateUserId && candidateUserId === cleanUserId) return true;
+        if (cleanEmail && candidateEmail && candidateEmail.toLowerCase() === cleanEmail) return true;
+        return false;
+      };
+
+      // 1. Check durable server webhook / callback / verified ledger first (instant!)
+      const ledgerMatch = ledger.verifiedPayments.find((p) => {
+        if (p.status === 'refunded') return false;
+        if (knownSet.has(p.paymentId)) return false;
+        return matchesCaller(p.userId, p.userEmail, p.orderId, p.subscriptionId);
+      });
+
+      if (ledgerMatch) {
+        removeMatchingPendingCheckout({
+          orderId: ledgerMatch.orderId || orderIdStr || undefined,
+          subscriptionId: ledgerMatch.subscriptionId || subIdStr || undefined,
+          checkoutId: pendingCheckoutId ? String(pendingCheckoutId) : undefined,
+        });
+        return res.json({
+          found: true,
+          source: ledgerMatch.source,
+          payment: ledgerMatch,
+        });
+      }
+
+      // 2. Directly query Razorpay REST API (works even before Webhook URL is configured or if webhook is 1-2s behind!)
+      const keyId = process.env.RAZORPAY_KEY_ID || process.env.VITE_RAZORPAY_KEY_ID || '';
+      const keySecret = process.env.RAZORPAY_KEY_SECRET || '';
+      const hasValidLiveCreds =
+        Boolean(keyId) && Boolean(keySecret) && keyId !== 'rzp_test_1DP5mmOlF5G5ag';
+
+      if (!hasValidLiveCreds) {
+        return res.json({ found: false, pendingProcessing: false });
+      }
+
+      const authHeader = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+      let pendingProcessing = false;
+
+      // 2a. Check specific pending One-Time Order ID on Razorpay
+      if (orderIdStr && orderIdStr.startsWith('order_')) {
+        try {
+          const orderPayRes = await fetch(
+            `https://api.razorpay.com/v1/orders/${encodeURIComponent(orderIdStr)}/payments`,
+            { headers: { Authorization: `Basic ${authHeader}` } }
+          );
+          if (orderPayRes.ok) {
+            const orderPayData = (await orderPayRes.json().catch(() => ({}))) as any;
+            const items: any[] = Array.isArray(orderPayData?.items) ? orderPayData.items : [];
+            const paidItem = items.find(
+              (p) =>
+                (p?.status === 'captured' || p?.status === 'authorized') &&
+                Number(p?.amount_refunded || 0) === 0 &&
+                !knownSet.has(String(p?.id || ''))
+            );
+            if (paidItem) {
+              const notes = paidItem.notes || {};
+              const resolvedCurrency = getCurrencyConfig(
+                String(paidItem.currency || currency || pendingMeta?.currency || 'INR')
+              ).code;
+              const entry = upsertVerifiedPayment({
+                paymentId: String(paidItem.id),
+                orderId: orderIdStr,
+                plan: normalizeValidPlan(notes.plan || plan || pendingMeta?.plan),
+                billingCycle: normalizeValidCycle(notes.billingCycle || billingCycle || pendingMeta?.billingCycle),
+                amount: fromRazorpayMinorUnits(Number(paidItem.amount || 0), resolvedCurrency) || Number(amount) || pendingMeta?.amount || 0,
+                currency: resolvedCurrency,
+                autoPay: false,
+                autoPayStatus: 'off',
+                userId: cleanUserId || notes.userId || pendingMeta?.userId,
+                userEmail: cleanEmail || notes.userEmail || paidItem.email || pendingMeta?.userEmail,
+                method: paidItem.method ? String(paidItem.method) : undefined,
+                status: paidItem.status === 'authorized' ? 'authorized' : 'captured',
+                source: 'reconcile',
+              });
+              return res.json({ found: true, source: 'razorpay_order_api', payment: entry });
+            }
+            if (items.some((p) => p?.status === 'created')) {
+              pendingProcessing = true;
+            }
+          }
+        } catch (err) {
+          console.warn('[/api/payment/reconcile] Order lookup notice:', err);
+        }
+      }
+
+      // 2b. Check specific pending Subscription ID on Razorpay (AutoPay)
+      if (subIdStr && subIdStr.startsWith('sub_') && !subIdStr.startsWith('sub_pref_')) {
+        try {
+          const subRes = await fetch(
+            `https://api.razorpay.com/v1/subscriptions/${encodeURIComponent(subIdStr)}`,
+            { headers: { Authorization: `Basic ${authHeader}` } }
+          );
+          if (subRes.ok) {
+            const subData = (await subRes.json().catch(() => ({}))) as any;
+            const subStatus = String(subData?.status || '');
+            const paidCount = Number(subData?.paid_count || 0);
+            if (subStatus === 'active' || subStatus === 'authenticated' || paidCount >= 1) {
+              let invPaymentId = '';
+              let invAmount = 0;
+              let invCurrency = String(currency || pendingMeta?.currency || 'INR');
+              let invMethod: string | undefined;
+              try {
+                const invRes = await fetch(
+                  `https://api.razorpay.com/v1/invoices?subscription_id=${encodeURIComponent(subIdStr)}`,
+                  { headers: { Authorization: `Basic ${authHeader}` } }
+                );
+                if (invRes.ok) {
+                  const invData = (await invRes.json().catch(() => ({}))) as any;
+                  const paidInv = (invData?.items || []).find(
+                    (inv: any) => inv?.payment_id && inv?.status === 'paid'
+                  );
+                  if (paidInv?.payment_id) {
+                    invPaymentId = String(paidInv.payment_id);
+                    invCurrency = String(paidInv.currency || invCurrency);
+                    invAmount = fromRazorpayMinorUnits(Number(paidInv.amount_paid || paidInv.amount || 0), invCurrency);
+                  }
+                }
+              } catch {
+                // fallback below
+              }
+              const finalPayId = invPaymentId || subIdStr;
+              if (!knownSet.has(finalPayId)) {
+                const notes = subData?.notes || {};
+                const entry = upsertVerifiedPayment({
+                  paymentId: finalPayId,
+                  subscriptionId: subIdStr,
+                  plan: normalizeValidPlan(notes.plan || plan || pendingMeta?.plan),
+                  billingCycle: normalizeValidCycle(notes.billingCycle || billingCycle || pendingMeta?.billingCycle),
+                  amount: invAmount || Number(amount) || pendingMeta?.amount || 0,
+                  currency: getCurrencyConfig(invCurrency).code,
+                  autoPay: true,
+                  autoPayStatus: 'active',
+                  userId: cleanUserId || notes.userId || pendingMeta?.userId,
+                  userEmail: cleanEmail || notes.userEmail || pendingMeta?.userEmail,
+                  method: invMethod,
+                  status: 'captured',
+                  source: 'reconcile',
+                });
+                return res.json({ found: true, source: 'razorpay_subscription_api', payment: entry });
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('[/api/payment/reconcile] Subscription lookup notice:', err);
+        }
+      }
+
+      // 2c. Recent Payments scan fallback (catches GPay / UPI / Card payments even if localStorage lost orderId)
+      if (cleanUserId || cleanEmail) {
+        try {
+          const minWindowSec = startedAt
+            ? Math.floor((Number(startedAt) - 180_000) / 1000)
+            : Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
+          const listRes = await fetch(
+            `https://api.razorpay.com/v1/payments?count=25&from=${Math.max(0, minWindowSec)}`,
+            { headers: { Authorization: `Basic ${authHeader}` } }
+          );
+          if (listRes.ok) {
+            const listData = (await listRes.json().catch(() => ({}))) as any;
+            const items: any[] = Array.isArray(listData?.items) ? listData.items : [];
+            const matched = items.find((p) => {
+              const pid = String(p?.id || '');
+              if (!pid || knownSet.has(pid)) return false;
+              if (Number(p?.amount_refunded || 0) > 0) return false;
+              if (p?.status !== 'captured' && p?.status !== 'authorized') return false;
+              const notes = p?.notes || {};
+              const nUid = String(notes.userId || '').trim();
+              const nEmail = String(notes.userEmail || p?.email || '').trim().toLowerCase();
+              if (cleanUserId && nUid && nUid === cleanUserId) return true;
+              if (cleanEmail && nEmail && nEmail === cleanEmail) return true;
+              return false;
+            });
+
+            if (matched) {
+              const notes = matched.notes || {};
+              const resolvedCurrency = getCurrencyConfig(
+                String(matched.currency || notes.currency || currency || pendingMeta?.currency || 'INR')
+              ).code;
+              const matchedSubId = matched.subscription_id ? String(matched.subscription_id) : subIdStr || undefined;
+              const isAutoPay =
+                Boolean(matchedSubId) ||
+                String(notes.autoPay || '').toLowerCase() === 'enabled' ||
+                Boolean(autoPay ?? pendingMeta?.autoPay);
+
+              const entry = upsertVerifiedPayment({
+                paymentId: String(matched.id),
+                orderId: matched.order_id ? String(matched.order_id) : orderIdStr || undefined,
+                subscriptionId: matchedSubId,
+                plan: normalizeValidPlan(notes.plan || plan || pendingMeta?.plan),
+                billingCycle: normalizeValidCycle(notes.billingCycle || billingCycle || pendingMeta?.billingCycle),
+                amount: fromRazorpayMinorUnits(Number(matched.amount || 0), resolvedCurrency) || Number(amount) || pendingMeta?.amount || 0,
+                currency: resolvedCurrency,
+                autoPay: isAutoPay,
+                autoPayStatus: isAutoPay ? 'active' : 'off',
+                userId: cleanUserId || notes.userId || pendingMeta?.userId,
+                userEmail: cleanEmail || notes.userEmail || matched.email || pendingMeta?.userEmail,
+                method: matched.method ? String(matched.method) : undefined,
+                status: matched.status === 'authorized' ? 'authorized' : 'captured',
+                source: 'reconcile',
+              });
+              return res.json({ found: true, source: 'razorpay_recent_payments_api', payment: entry });
+            }
+
+            if (
+              items.some((p) => {
+                if (p?.status !== 'created') return false;
+                const notes = p?.notes || {};
+                const nUid = String(notes.userId || '').trim();
+                const nEmail = String(notes.userEmail || p?.email || '').trim().toLowerCase();
+                return (cleanUserId && nUid === cleanUserId) || (cleanEmail && nEmail === cleanEmail);
+              })
+            ) {
+              pendingProcessing = true;
+            }
+          }
+        } catch (err) {
+          console.warn('[/api/payment/reconcile] Recent payments lookup notice:', err);
+        }
+      }
+
+      return res.json({ found: false, pendingProcessing });
+    } catch (err: any) {
+      console.error('[/api/payment/reconcile] Error:', err);
+      return res.json({ found: false, pendingProcessing: false });
     }
   });
 
