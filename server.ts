@@ -2576,6 +2576,15 @@ async function startServer() {
     return adminDbPromise;
   }
 
+  // Razorpay gives payment time as unix seconds (created_at). Use it so membership starts when the customer PAID, not when they opened the site.
+  function razorpayPaidAtIso(unixSeconds: unknown): string | undefined {
+    const n = Number(unixSeconds);
+    if (!Number.isFinite(n) || n <= 0) return undefined;
+    const ms = n * 1000;
+    if (ms > Date.now() + 5 * 60 * 1000) return undefined;
+    return new Date(ms).toISOString();
+  }
+
   const CYCLE_MONTHS: Record<string, number> = { monthly: 1, '3months': 3, '6months': 6, yearly: 12 };
 
   async function activateMembershipInFirestore(p: {
@@ -2589,6 +2598,7 @@ async function startServer() {
     autoPayStatus: string;
     userId?: string;
     userEmail?: string;
+    paidAt?: string;
   }): Promise<boolean> {
     try {
       const db = await getAdminDb();
@@ -2618,16 +2628,18 @@ async function startServer() {
           return;
         }
         const now = new Date();
-        const expiry = new Date(now);
+        const paidDate = p.paidAt && !Number.isNaN(new Date(p.paidAt).getTime()) ? new Date(p.paidAt) : now;
+        const expiry = new Date(paidDate);
         expiry.setMonth(expiry.getMonth() + (CYCLE_MONTHS[p.billingCycle] || 1));
         const nowIso = now.toISOString();
+        const paidIso = paidDate.toISOString();
         const record: Record<string, any> = {
           paymentId: p.paymentId,
           plan: p.plan,
           billingCycle: p.billingCycle,
           amount: p.amount,
           currency: p.currency,
-          date: nowIso,
+          date: paidIso,
           expiresAt: expiry.toISOString(),
           autoPay: p.autoPay,
         };
@@ -2643,7 +2655,7 @@ async function startServer() {
           lastPaymentId: p.paymentId,
           lastPaymentAmount: p.amount,
           lastPaymentCurrency: p.currency,
-          lastPaymentDate: nowIso,
+          lastPaymentDate: paidIso,
           paymentHistory: [record, ...history].slice(0, 20),
           updatedAt: nowIso,
         });
@@ -2816,6 +2828,7 @@ async function startServer() {
           method: livePayment?.method ? String(livePayment.method) : undefined,
           status: livePayment?.status === 'authorized' ? 'authorized' : 'captured',
           source: 'webhook',
+          createdAt: razorpayPaidAtIso(livePayment?.created_at),
         });
 
         // Save the membership in Firestore right now (no need for the customer to reopen the site)
@@ -2831,6 +2844,7 @@ async function startServer() {
             autoPayStatus: isAutoPay ? 'active' : 'off',
             userId: resolvedUserId,
             userEmail: resolvedUserEmail,
+            paidAt: razorpayPaidAtIso(livePayment?.created_at),
           });
         }
       }
@@ -3053,6 +3067,7 @@ async function startServer() {
                 method: paidItem.method ? String(paidItem.method) : undefined,
                 status: paidItem.status === 'authorized' ? 'authorized' : 'captured',
                 source: 'reconcile',
+                createdAt: razorpayPaidAtIso(paidItem.created_at),
               });
               return res.json({ found: true, source: 'razorpay_order_api', payment: entry });
             }
@@ -3179,6 +3194,7 @@ async function startServer() {
                 method: matched.method ? String(matched.method) : undefined,
                 status: matched.status === 'authorized' ? 'authorized' : 'captured',
                 source: 'reconcile',
+                createdAt: razorpayPaidAtIso(matched.created_at),
               });
               return res.json({ found: true, source: 'razorpay_recent_payments_api', payment: entry });
             }
