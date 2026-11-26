@@ -39,6 +39,23 @@ interface BillingViewProps {
   onNavigate: (path: string) => void;
 }
 
+
+// Shows the exact payment date AND time (in the viewer's local time zone)
+function formatPaidDateTime(iso: string | undefined, withZone = false): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString('en-US', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    ...(withZone ? { timeZoneName: 'short' as const } : {}),
+  });
+}
+
 export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
   const { user, cancelMembership, setAutoPayStatus, updateUserPlan } = useAuthStore();
   const { activePlan, setPlan } = useImageStore();
@@ -275,11 +292,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
   const handleDownloadReceipt = (record: PaymentRecord) => {
     const recCurrency = record.currency || user?.lastPaymentCurrency || 'INR';
     const cycleLabel = getBillingCycleOption(record.billingCycle || 'monthly').label;
-    const paidDate = new Date(record.date).toLocaleDateString('en-US', {
-      day: 'numeric',
-      month: 'short',
-      year: 'numeric',
-    });
+    const paidDate = formatPaidDateTime(record.date, true);
     const validTill = record.expiresAt
       ? new Date(record.expiresAt).toLocaleDateString('en-US', {
           day: 'numeric',
@@ -807,11 +820,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
             {paymentRecords.map((record) => {
               const recCurrency = record.currency || user?.lastPaymentCurrency || 'INR';
               const cycleLabel = getBillingCycleOption(record.billingCycle || 'monthly').label;
-              const paidDateStr = new Date(record.date).toLocaleDateString('en-US', {
-                day: 'numeric',
-                month: 'short',
-                year: 'numeric',
-              });
+              const paidDateStr = formatPaidDateTime(record.date);
               const isRefunded =
                 record.status === 'cancelled_refunded' || record.status === 'refund_pending';
 
