@@ -367,6 +367,7 @@ export interface ReconciledPaymentResult {
     autoPay: boolean;
     autoPayStatus: AutoPayStatus;
     method?: string;
+    createdAt?: string;
   };
 }
 
