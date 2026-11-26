@@ -2533,6 +2533,129 @@ async function startServer() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // Server-side membership activation (Firebase Admin SDK).
+  // Called from the Razorpay webhook so the plan is saved in Firestore the moment
+  // the payment succeeds, even if the customer never reopens the website.
+  // Needs env var FIREBASE_SERVICE_ACCOUNT (full service-account JSON, one line).
+  // ---------------------------------------------------------------------------
+  let adminDbPromise: Promise<any | null> | null = null;
+  function getAdminDb(): Promise<any | null> {
+    if (adminDbPromise) return adminDbPromise;
+    adminDbPromise = (async () => {
+      try {
+        const raw = (process.env.FIREBASE_SERVICE_ACCOUNT || '').trim();
+        if (!raw) {
+          console.warn('[Membership] FIREBASE_SERVICE_ACCOUNT not set; webhook cannot activate plans server-side.');
+          return null;
+        }
+        const serviceAccount = JSON.parse(raw);
+        if (typeof serviceAccount.private_key === 'string') {
+          serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+        }
+        const cfg = JSON.parse(
+          fs.readFileSync(path.resolve(__dirname, 'firebase-applet-config.json'), 'utf8')
+        );
+        const adminApp = await import('firebase-admin/app');
+        const adminFs = await import('firebase-admin/firestore');
+        const app =
+          adminApp.getApps().length > 0
+            ? adminApp.getApps()[0]
+            : adminApp.initializeApp({
+                credential: adminApp.cert(serviceAccount),
+                projectId: cfg.projectId,
+              });
+        return cfg.firestoreDatabaseId
+          ? adminFs.getFirestore(app, cfg.firestoreDatabaseId)
+          : adminFs.getFirestore(app);
+      } catch (err) {
+        console.error('[Membership] Firebase Admin init failed:', err);
+        return null;
+      }
+    })();
+    return adminDbPromise;
+  }
+
+  const CYCLE_MONTHS: Record<string, number> = { monthly: 1, '3months': 3, '6months': 6, yearly: 12 };
+
+  async function activateMembershipInFirestore(p: {
+    paymentId: string;
+    subscriptionId?: string;
+    plan: string;
+    billingCycle: string;
+    amount: number;
+    currency: string;
+    autoPay: boolean;
+    autoPayStatus: string;
+    userId?: string;
+    userEmail?: string;
+  }): Promise<boolean> {
+    try {
+      const db = await getAdminDb();
+      if (!db) return false;
+
+      // Find the user document: by userId first, else by email
+      let userRef: any = null;
+      if (p.userId && /^[a-zA-Z0-9_-]{1,128}$/.test(p.userId)) {
+        const ref = db.collection('users').doc(p.userId);
+        if ((await ref.get()).exists) userRef = ref;
+      }
+      if (!userRef && p.userEmail) {
+        const q = await db.collection('users').where('email', '==', p.userEmail).limit(1).get();
+        if (!q.empty) userRef = q.docs[0].ref;
+      }
+      if (!userRef) {
+        console.warn(`[Membership] No Firestore user found for payment ${p.paymentId}`);
+        return false;
+      }
+
+      await db.runTransaction(async (tx: any) => {
+        const snap = await tx.get(userRef);
+        const data = snap.data() || {};
+        // Idempotent: Razorpay may send the same event several times
+        const history: any[] = Array.isArray(data.paymentHistory) ? data.paymentHistory : [];
+        if (data.lastPaymentId === p.paymentId || history.some((h) => h?.paymentId === p.paymentId)) {
+          return;
+        }
+        const now = new Date();
+        const expiry = new Date(now);
+        expiry.setMonth(expiry.getMonth() + (CYCLE_MONTHS[p.billingCycle] || 1));
+        const nowIso = now.toISOString();
+        const record: Record<string, any> = {
+          paymentId: p.paymentId,
+          plan: p.plan,
+          billingCycle: p.billingCycle,
+          amount: p.amount,
+          currency: p.currency,
+          date: nowIso,
+          expiresAt: expiry.toISOString(),
+          autoPay: p.autoPay,
+        };
+        if (p.subscriptionId) record.subscriptionId = p.subscriptionId;
+        tx.update(userRef, {
+          plan: p.plan,
+          billingCycle: p.billingCycle,
+          planExpiresAt: expiry.toISOString(),
+          autoPayEnabled: p.autoPay,
+          autoPayStatus: p.autoPayStatus,
+          autoPayUpdatedAt: nowIso,
+          ...(p.subscriptionId ? { subscriptionId: p.subscriptionId } : {}),
+          lastPaymentId: p.paymentId,
+          lastPaymentAmount: p.amount,
+          lastPaymentCurrency: p.currency,
+          lastPaymentDate: nowIso,
+          paymentHistory: [record, ...history].slice(0, 20),
+          updatedAt: nowIso,
+        });
+      });
+      console.log(`[Membership] Activated ${p.plan}/${p.billingCycle} for payment ${p.paymentId}`);
+      return true;
+    } catch (err) {
+      console.error('[Membership] Firestore activation failed:', err);
+      return false;
+    }
+  }
+
   // Authoritative Razorpay Webhook Listener (handles GPay, PhonePe, Paytm, all UPI & Card events even when low-RAM phone kills browser tab)
   const handleRazorpayWebhook = async (req: any, res: express.Response) => {
     try {
@@ -2694,6 +2817,22 @@ async function startServer() {
           status: livePayment?.status === 'authorized' ? 'authorized' : 'captured',
           source: 'webhook',
         });
+
+        // Save the membership in Firestore right now (no need for the customer to reopen the site)
+        if (livePayment?.status !== 'authorized') {
+          await activateMembershipInFirestore({
+            paymentId: effectivePaymentId,
+            subscriptionId,
+            plan: resolvedPlan,
+            billingCycle: resolvedCycle,
+            amount: resolvedAmount,
+            currency: resolvedCurrency,
+            autoPay: isAutoPay,
+            autoPayStatus: isAutoPay ? 'active' : 'off',
+            userId: resolvedUserId,
+            userEmail: resolvedUserEmail,
+          });
+        }
       }
 
       return res.json({ status: 'ok' });
