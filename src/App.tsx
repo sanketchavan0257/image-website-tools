@@ -283,7 +283,14 @@ export default function App() {
           const nowIso = new Date().toISOString();
           plan = recPay.plan;
           billingCycle = recPay.billingCycle;
-          planExpiresAt = calculatePlanExpiryDate(recPay.billingCycle);
+          // Membership starts when the customer PAID (Razorpay time), not when they opened the site
+          const paidAtRaw = recPay.createdAt ? new Date(recPay.createdAt) : null;
+          const paidDate =
+            paidAtRaw && !Number.isNaN(paidAtRaw.getTime()) && paidAtRaw.getTime() <= Date.now()
+              ? paidAtRaw
+              : new Date();
+          const paidIso = paidDate.toISOString();
+          planExpiresAt = calculatePlanExpiryDate(recPay.billingCycle, paidDate);
           autoPayEnabled = recPay.autoPay;
           autoPayStatus = recPay.autoPayStatus;
           if (recPay.subscriptionId) {
@@ -293,7 +300,7 @@ export default function App() {
           lastPaymentId = recPay.paymentId;
           lastPaymentAmount = recPay.amount;
           lastPaymentCurrency = recPay.currency;
-          lastPaymentDate = nowIso;
+          lastPaymentDate = paidIso;
 
           const newRecord: PaymentRecord = {
             paymentId: recPay.paymentId,
@@ -301,7 +308,7 @@ export default function App() {
             billingCycle: recPay.billingCycle,
             amount: recPay.amount,
             currency: recPay.currency,
-            date: nowIso,
+            date: paidIso,
             expiresAt: planExpiresAt,
             autoPay: recPay.autoPay,
             subscriptionId: recPay.subscriptionId,
