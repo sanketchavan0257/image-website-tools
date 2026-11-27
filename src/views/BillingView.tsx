@@ -146,11 +146,11 @@ function RefundStatusModal({ record, onClose }: { record: PaymentRecord; onClose
     <div
       role="dialog"
       aria-modal="true"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-xs"
+      className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-slate-900/70 backdrop-blur-xs"
       onClick={onClose}
     >
       <div
-        className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-100 p-6 sm:p-7 space-y-5"
+        className="relative w-full h-full max-w-none rounded-none overflow-y-auto sm:h-auto sm:max-h-[90vh] sm:max-w-md sm:rounded-3xl bg-white shadow-2xl border border-slate-100 p-6 sm:p-7 space-y-5"
         onClick={(e) => e.stopPropagation()}
       >
         <button
