@@ -9,6 +9,8 @@ import {
   requestProRataRefund,
   cancelAutoPaySubscription,
   openDirectRazorpayCheckout,
+  fetchRefundLiveStatus,
+  RefundLiveStatus,
 } from '../services/razorpayService';
 import { formatCurrency, getCurrencyConfig } from '../config/currencies';
 import { PaymentRecord } from '../types/auth';
@@ -33,6 +35,10 @@ import {
   RotateCcw,
   ArrowLeft,
   Repeat,
+  Loader2,
+  Clock,
+  Landmark,
+  RefreshCw,
 } from 'lucide-react';
 
 interface BillingViewProps {
@@ -56,10 +62,201 @@ function formatPaidDateTime(iso: string | undefined, withZone = false): string {
   });
 }
 
+
+// Adds N working days (Mon-Fri) to a date
+function addWorkingDays(from: Date, days: number): Date {
+  const d = new Date(from);
+  let added = 0;
+  while (added < days) {
+    d.setDate(d.getDate() + 1);
+    const day = d.getDay();
+    if (day !== 0 && day !== 6) added += 1;
+  }
+  return d;
+}
+
+type StepState = 'done' | 'active' | 'upcoming' | 'failed';
+
+// Refund tracker: Membership cancelled -> Refund processing -> Refund processed
+function RefundStatusModal({ record, onClose }: { record: PaymentRecord; onClose: () => void }) {
+  const [live, setLive] = useState<RefundLiveStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+  const currency = record.currency || 'INR';
+
+  const load = React.useCallback(async () => {
+    if (!record.refundId) return;
+    setLoading(true);
+    const res = await fetchRefundLiveStatus(record.refundId);
+    setLive(res);
+    setLoading(false);
+  }, [record.refundId]);
+
+  React.useEffect(() => {
+    load();
+  }, [load]);
+
+  // Keep checking every 30 seconds until Razorpay says processed / failed
+  React.useEffect(() => {
+    if (live && (live.status === 'processed' || live.status === 'failed')) return;
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
+  }, [live, load]);
+
+  // If Razorpay status is unknown, treat the refund as "processing" (safe default)
+  const refundState: 'pending' | 'processed' | 'failed' =
+    live?.status === 'processed' ? 'processed' : live?.status === 'failed' ? 'failed' : 'pending';
+
+  const baseDate = new Date(live?.createdAt || record.cancelledAt || Date.now());
+  const expectedBy = addWorkingDays(Number.isNaN(baseDate.getTime()) ? new Date() : baseDate, 7);
+  const expectedPassed = refundState === 'processed' && Date.now() > expectedBy.getTime();
+  const isInstant = live?.speedProcessed === 'instant';
+
+  const steps: { title: string; subtitle: string; time?: string; state: StepState }[] = [
+    {
+      title: 'Membership cancelled',
+      subtitle: 'Your membership has been cancelled.',
+      time: formatPaidDateTime(record.cancelledAt),
+      state: 'done',
+    },
+    {
+      title: 'Refund processing',
+      subtitle:
+        refundState === 'failed'
+          ? 'Refund could not be completed. Please contact support with your Refund ID.'
+          : 'Takes 3-5 working days',
+      state: refundState === 'failed' ? 'failed' : refundState === 'pending' ? 'active' : 'done',
+    },
+    {
+      title: 'Refund processed',
+      subtitle: "Amount will be credited to customer's bank account within 5-7 working days after the refund has processed.",
+      state: refundState === 'processed' ? 'done' : 'upcoming',
+    },
+  ];
+
+  const dot = (st: StepState) =>
+    st === 'done'
+      ? 'bg-emerald-500 text-white'
+      : st === 'active'
+      ? 'bg-amber-400 text-white animate-pulse'
+      : st === 'failed'
+      ? 'bg-rose-500 text-white'
+      : 'bg-slate-200 text-slate-400';
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-xs"
+      onClick={onClose}
+    >
+      <div
+        className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-100 p-6 sm:p-7 space-y-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute top-5 right-5 p-1.5 rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100 cursor-pointer"
+          aria-label="Close"
+        >
+          <X className="w-5 h-5" />
+        </button>
+
+        <div>
+          <h3 className="text-lg font-black text-slate-900 tracking-tight">Refund Status</h3>
+          <p className="text-xs text-slate-500 mt-1">
+            Refund amount:{' '}
+            <strong className="text-emerald-700">{formatCurrency(record.refundAmount ?? 0, currency)}</strong>
+            {isInstant && (
+              <span className="ml-2 text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-blue-100 text-blue-800">
+                Instant refund
+              </span>
+            )}
+          </p>
+        </div>
+
+        <ol className="space-y-0">
+          {steps.map((step, i) => (
+            <li key={step.title} className="flex gap-3.5">
+              <div className="flex flex-col items-center">
+                <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${dot(step.state)}`}>
+                  {step.state === 'done' ? (
+                    <Check className="w-4 h-4" />
+                  ) : step.state === 'failed' ? (
+                    <X className="w-4 h-4" />
+                  ) : step.state === 'active' ? (
+                    <Clock className="w-4 h-4" />
+                  ) : (
+                    <span className="text-[11px] font-black">{i + 1}</span>
+                  )}
+                </div>
+                {i < steps.length - 1 && (
+                  <div className={`w-0.5 flex-1 min-h-8 ${step.state === 'done' ? 'bg-emerald-300' : 'bg-slate-200'}`} />
+                )}
+              </div>
+              <div className="pb-5">
+                <p
+                  className={`text-sm font-extrabold ${
+                    step.state === 'upcoming' ? 'text-slate-400' : step.state === 'failed' ? 'text-rose-700' : 'text-slate-900'
+                  }`}
+                >
+                  {step.title}
+                </p>
+                {step.time && <p className="text-[11px] font-bold text-slate-500">{step.time}</p>}
+                <p className="text-xs text-slate-500 leading-relaxed mt-0.5">{step.subtitle}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+
+        {refundState === 'processed' && (
+          <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-100 text-xs text-emerald-900 space-y-1">
+            <p className="font-extrabold flex items-center gap-1.5">
+              <Landmark className="w-3.5 h-3.5" /> Refund sent to your bank
+            </p>
+            <p>
+              {expectedPassed
+                ? 'The refund should have reached your account by now. If you have not received it, please contact your bank and share the details below.'
+                : `Expected to reach your account by ${expectedBy.toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })} at the latest.`}
+            </p>
+            {live?.arn && (
+              <p className="font-mono text-[11px]">
+                Bank reference (ARN): <strong>{live.arn}</strong>
+              </p>
+            )}
+          </div>
+        )}
+
+        <div className="text-[11px] text-slate-500 space-y-1">
+          {record.refundId && (
+            <p className="font-mono">
+              Refund ID: <strong className="text-slate-700">{record.refundId}</strong>
+            </p>
+          )}
+          <p>
+            Razorpay confirms when the refund is processed. Banks do not report the exact time money lands in your account.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={load}
+          disabled={loading}
+          className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+        >
+          {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+          <span>{loading ? 'Checking…' : 'Refresh status'}</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
   const { user, cancelMembership, setAutoPayStatus, updateUserPlan } = useAuthStore();
   const { activePlan, setPlan } = useImageStore();
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [statusRecord, setStatusRecord] = useState<PaymentRecord | null>(null);
   const [isTogglingAutoPay, setIsTogglingAutoPay] = useState(false);
   const [autoPayNotice, setAutoPayNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
@@ -892,6 +1089,16 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
                       <Download className="w-3.5 h-3.5 text-blue-600" />
                       <span>Receipt</span>
                     </button>
+                    {isRefunded && (
+                      <button
+                        type="button"
+                        onClick={() => setStatusRecord(record)}
+                        className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 text-xs font-bold flex items-center gap-1.5 shadow-2xs cursor-pointer transition-colors"
+                      >
+                        <Clock className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Status</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               );
@@ -899,6 +1106,8 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
           </div>
         )}
       </div>
+
+      {statusRecord && <RefundStatusModal record={statusRecord} onClose={() => setStatusRecord(null)} />}
 
       {/* Cancel Membership & Pro-Rata Refund Alert Dialog */}
       {isCancelModalOpen && (
