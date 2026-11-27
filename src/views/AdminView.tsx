@@ -37,6 +37,8 @@ import {
   Globe,
   Calendar,
   BarChart3,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
 
 interface AdminViewProps {
@@ -87,6 +89,13 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
   const [isLoadingUsers, setIsLoadingUsers] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterTab, setFilterTab] = useState<FilterTab>('all');
+  const USERS_PER_PAGE = 5;
+  const [currentPage, setCurrentPage] = useState(1);
+
+  // Filter / search badalla ki parat page 1 var ja
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filterTab, searchQuery]);
 
   // Action modal state
   const [modalState, setModalState] = useState<{
@@ -178,6 +187,17 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
     const startDate = activeRecord?.date || target.lastPaymentDate || target.createdAt;
     const expiresAt = target.planExpiresAt || activeRecord?.expiresAt;
     return { amount, currency, cycle, startDate, expiresAt, paymentId: realPaymentId, hasRealPayment };
+  };
+
+  // Membership kadhi ghetli: fakt valid date asel tar return, nahitar null
+  const getPurchaseDate = (target: UserProfile): Date | null => {
+    const activeRecord = (target.paymentHistory || []).find(
+      (r) => r.status !== 'cancelled_refunded' && r.status !== 'refund_pending'
+    );
+    const raw = activeRecord?.date || target.lastPaymentDate;
+    if (!raw) return null;
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d;
   };
 
   const openActionModal = (targetUser: UserProfile, mode: AdminActionMode) => {
@@ -451,6 +471,11 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
     );
   });
 
+  // Pagination (5 users per page)
+  const totalPages = Math.max(1, Math.ceil(filteredUsers.length / USERS_PER_PAGE));
+  const safePage = Math.min(currentPage, totalPages);
+  const pagedUsers = filteredUsers.slice((safePage - 1) * USERS_PER_PAGE, safePage * USERS_PER_PAGE);
+
   // Modal breakdown computation
   const modalBreakdown = modalState
     ? (() => {
@@ -715,8 +740,9 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
               </p>
             </div>
           ) : (
-            filteredUsers.map((member) => {
+            pagedUsers.map((member) => {
               const paidInfo = getUserPaidInfo(member);
+              const purchaseDate = getPurchaseDate(member);
               const cycleLabel = member.billingCycle
                 ? getBillingCycleOption(member.billingCycle).label
                 : 'Monthly';
@@ -792,6 +818,19 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
                           <span>
                             Paid: <strong className="text-slate-900">{formatCurrency(paidInfo.amount, paidInfo.currency, { includeCode: true })}</strong> ({cycleLabel})
                           </span>
+                          {purchaseDate && (
+                            <span className="inline-flex items-center gap-1">
+                              <Calendar className="w-3 h-3 text-emerald-600" />
+                              Purchased:{' '}
+                              <strong>
+                                {purchaseDate.toLocaleDateString('en-IN', {
+                                  day: 'numeric',
+                                  month: 'short',
+                                  year: 'numeric',
+                                })}
+                              </strong>
+                            </span>
+                          )}
                           {member.planExpiresAt && (
                             <span className="inline-flex items-center gap-1">
                               <Calendar className="w-3 h-3 text-blue-600" />
@@ -863,6 +902,32 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
                 </div>
               );
             })
+          )}
+
+          {filteredUsers.length > USERS_PER_PAGE && (
+            <div className="flex items-center justify-between gap-3 pt-2">
+              <button
+                type="button"
+                disabled={safePage === 1}
+                onClick={() => setCurrentPage(safePage - 1)}
+                className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+              >
+                <ChevronLeft className="w-4 h-4" />
+                <span>Prev</span>
+              </button>
+              <span className="text-xs font-semibold text-slate-500">
+                Page {safePage} / {totalPages} • {filteredUsers.length} users
+              </span>
+              <button
+                type="button"
+                disabled={safePage === totalPages}
+                onClick={() => setCurrentPage(safePage + 1)}
+                className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+              >
+                <span>Next</span>
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
           )}
         </div>
           </>
