@@ -1697,6 +1697,45 @@ async function startServer() {
   });
 
   // Server-side Razorpay Pro-Rata Refund endpoint (supports all international & INR currencies)
+  // ---------------------------------------------------------------------------
+  // Live refund status (Razorpay is the source of truth: pending / processed / failed)
+  // ---------------------------------------------------------------------------
+  app.get('/api/refund/status', async (req, res) => {
+    try {
+      const refundId = String(req.query.refundId || '').trim();
+      // Real Razorpay refund ids look like rfnd_AbCdEf123456 (no extra underscores).
+      if (!/^rfnd_[A-Za-z0-9]{10,24}$/.test(refundId)) {
+        return res.json({ success: true, known: false, status: 'unknown' });
+      }
+      const keyId = process.env.RAZORPAY_KEY_ID || process.env.VITE_RAZORPAY_KEY_ID || '';
+      const keySecret = process.env.RAZORPAY_KEY_SECRET || '';
+      if (!keyId || !keySecret) {
+        return res.json({ success: true, known: false, status: 'unknown' });
+      }
+      const authHeader = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+      const rzpRes = await fetch(`https://api.razorpay.com/v1/refunds/${encodeURIComponent(refundId)}`, {
+        headers: { Authorization: `Basic ${authHeader}` },
+      });
+      if (!rzpRes.ok) {
+        return res.json({ success: true, known: false, status: 'unknown' });
+      }
+      const r = (await rzpRes.json().catch(() => ({}))) as any;
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({
+        success: true,
+        known: true,
+        status: String(r.status || 'pending'), // pending | processed | failed
+        speedProcessed: r.speed_processed || undefined, // normal | instant
+        speedRequested: r.speed_requested || undefined,
+        createdAt: Number(r.created_at) > 0 ? new Date(Number(r.created_at) * 1000).toISOString() : undefined,
+        arn: r.acquirer_data?.arn || undefined,
+      });
+    } catch (err) {
+      console.error('[/api/refund/status] error:', err);
+      return res.json({ success: true, known: false, status: 'unknown' });
+    }
+  });
+
   app.post('/api/refund', async (req, res) => {
     try {
       const {
@@ -1858,6 +1897,7 @@ async function startServer() {
           mode: 'razorpay_api',
           refundId: rzpData.id || `rfnd_${Date.now()}`,
           status: rzpData.status || 'processed',
+          speed: rzpData.speed_processed || rzpData.speed_requested || undefined,
           currency: rzpData.currency || effectiveCurrency,
           refundAmount: numericRefund,
           refundAmountINR: numericRefund,
