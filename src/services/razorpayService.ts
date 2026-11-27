@@ -1022,3 +1022,34 @@ export async function requestProRataRefund(payload: {
     };
   }
 }
+
+export interface RefundLiveStatus {
+  known: boolean;
+  status: 'pending' | 'processed' | 'failed' | 'unknown';
+  speedProcessed?: 'normal' | 'instant';
+  speedRequested?: 'normal' | 'optimum' | 'instant';
+  createdAt?: string;
+  arn?: string;
+}
+
+/** Asks our server (which asks Razorpay) for the real, current status of a refund. */
+export async function fetchRefundLiveStatus(refundId: string): Promise<RefundLiveStatus> {
+  try {
+    const res = await fetch(`/api/refund/status?refundId=${encodeURIComponent(refundId)}`, {
+      cache: 'no-store',
+    });
+    if (!res.ok) return { known: false, status: 'unknown' };
+    const data = await res.json();
+    const st = String(data?.status || 'unknown');
+    return {
+      known: Boolean(data?.known),
+      status: st === 'pending' || st === 'processed' || st === 'failed' ? st : 'unknown',
+      speedProcessed: data?.speedProcessed,
+      speedRequested: data?.speedRequested,
+      createdAt: data?.createdAt,
+      arn: data?.arn,
+    };
+  } catch {
+    return { known: false, status: 'unknown' };
+  }
+}
