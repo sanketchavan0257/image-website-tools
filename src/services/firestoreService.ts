@@ -216,6 +216,24 @@ export async function getAllUsersFromFirestore(): Promise<FirestoreUserData[]> {
     return [];
   }
   const path = 'users';
+  // 1) Preferred: ask our server (Firebase Admin SDK) for ALL users. Not blocked by browser rules.
+  try {
+    const token = await auth.currentUser.getIdToken();
+    const res = await fetch('/api/admin/users', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.ok) {
+      const body = await res.json();
+      if (Array.isArray(body?.users)) {
+        return body.users as FirestoreUserData[];
+      }
+    } else {
+      console.warn('Admin users API returned', res.status);
+    }
+  } catch (apiErr) {
+    console.warn('Admin users API failed, falling back to direct Firestore read:', apiErr);
+  }
+  // 2) Fallback: read directly from Firestore (needs admin rules to pass)
   try {
     const snap = await getDocs(collection(db, 'users'));
     return snap.docs.map((d) => ({
@@ -408,4 +426,3 @@ export async function updateUserNameInFirestore(userId: string, name: string): P
     return false;
   }
 }
-
