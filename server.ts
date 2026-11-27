@@ -2668,6 +2668,49 @@ async function startServer() {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Admin panel: list ALL users from Firestore via the server (Firebase Admin SDK).
+  // Works even if the browser's Firestore rules check fails. Only the admin can call it.
+  // ---------------------------------------------------------------------------
+  app.get('/api/admin/users', async (req, res) => {
+    try {
+      const authHeader = String(req.headers.authorization || '');
+      const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+      if (!idToken) {
+        return res.status(401).json({ error: 'Missing sign-in token.' });
+      }
+      const db = await getAdminDb();
+      if (!db) {
+        return res.status(503).json({ error: 'Firebase Admin is not configured on the server.' });
+      }
+      const adminAuth = await import('firebase-admin/auth');
+      const decoded = await adminAuth.getAuth().verifyIdToken(idToken);
+
+      const { ADMIN_EMAIL } = getPublicRuntimeEnv();
+      const allowedEmail = (ADMIN_EMAIL || 'sanketchavan0257@gmail.com').trim().toLowerCase();
+      const tokenEmail = String(decoded.email || '').trim().toLowerCase();
+      let isAdmin = !!tokenEmail && tokenEmail === allowedEmail && decoded.email_verified === true;
+      if (!isAdmin) {
+        const adminDoc = await db.collection('admins').doc(decoded.uid).get();
+        isAdmin = adminDoc.exists;
+      }
+      if (!isAdmin) {
+        return res.status(403).json({ error: 'Admin access only.' });
+      }
+
+      const snap = await db.collection('users').get();
+      const users = snap.docs.map((d: any) => {
+        const data = d.data() || {};
+        return { ...data, userId: data.userId || d.id };
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ users });
+    } catch (err) {
+      console.error('[Admin] /api/admin/users failed:', err);
+      return res.status(500).json({ error: 'Could not load users.' });
+    }
+  });
+
   // Authoritative Razorpay Webhook Listener (handles GPay, PhonePe, Paytm, all UPI & Card events even when low-RAM phone kills browser tab)
   const handleRazorpayWebhook = async (req: any, res: express.Response) => {
     try {
