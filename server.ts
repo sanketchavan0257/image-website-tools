@@ -1736,6 +1736,242 @@ async function startServer() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // Cancel membership + refund, decided ENTIRELY on the server.
+  // The browser sends no amount and no date. The server:
+  //   1) verifies the Firebase login token,  2) reads the user's own record,
+  //   3) reads the real payment from Razorpay (amount, time, owner, already-refunded),
+  //   4) computes days + refund with its own clock,  5) refunds via Razorpay,
+  //   6) saves plan=free + refund details in Firestore (Admin SDK).
+  // ---------------------------------------------------------------------------
+  const cancelInFlight = new Set<string>();
+
+  app.post('/api/membership/cancel', async (req, res) => {
+    let lockedUid = '';
+    try {
+      const authHeader = String(req.headers.authorization || '');
+      const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+      if (!idToken) {
+        return res.status(401).json({ success: false, error: 'Please log in again and retry.' });
+      }
+
+      const db = await getAdminDb();
+      if (!db) {
+        return res.status(503).json({ success: false, error: 'Server is not configured for cancellations yet.' });
+      }
+      const adminAuth = await import('firebase-admin/auth');
+      const adminFs = await import('firebase-admin/firestore');
+      let decoded: any;
+      try {
+        decoded = await adminAuth.getAuth().verifyIdToken(idToken);
+      } catch {
+        return res.status(401).json({ success: false, error: 'Login expired. Please log in again and retry.' });
+      }
+      const uid = String(decoded.uid);
+      const tokenEmail = String(decoded.email || '').trim().toLowerCase();
+
+      if (cancelInFlight.has(uid)) {
+        return res.status(409).json({ success: false, error: 'Cancellation is already in progress.' });
+      }
+      cancelInFlight.add(uid);
+      lockedUid = uid;
+
+      const userRef = db.collection('users').doc(uid);
+      const userSnap = await userRef.get();
+      if (!userSnap.exists) {
+        return res.status(404).json({ success: false, error: 'Account not found.' });
+      }
+      const userData = userSnap.data() || {};
+      if (!userData.plan || userData.plan === 'free') {
+        return res.status(400).json({ success: false, error: 'There is no active membership to cancel.' });
+      }
+
+      const keyId = process.env.RAZORPAY_KEY_ID || process.env.VITE_RAZORPAY_KEY_ID || '';
+      const keySecret = process.env.RAZORPAY_KEY_SECRET || '';
+      if (!keyId || !keySecret) {
+        return res.status(503).json({ success: false, error: 'Payments are not configured on the server.' });
+      }
+      const rzpAuth = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+      const rzpHeaders = { Authorization: `Basic ${rzpAuth}`, 'Content-Type': 'application/json' };
+
+      const history: any[] = Array.isArray(userData.paymentHistory) ? userData.paymentHistory : [];
+      const record = history.find(
+        (r) =>
+          r &&
+          r.status !== 'cancelled_refunded' &&
+          r.status !== 'refund_pending' &&
+          /^pay_[A-Za-z0-9]+$/.test(String(r.paymentId || '')) &&
+          Number(r.amount) > 0
+      );
+
+      let refundMajor = 0;
+      let refundId = `rfnd_none_${Date.now()}`;
+      let refundStatus = 'processed';
+      let currency = String(userData.lastPaymentCurrency || 'INR');
+      let daysUsed = 0;
+      let totalDays = 0;
+      let refundDone = false;
+      let alreadyRefunded = false;
+
+      if (record) {
+        const payRes = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(record.paymentId)}`, {
+          headers: rzpHeaders,
+        });
+        const payment = (await payRes.json().catch(() => ({}))) as any;
+        if (!payRes.ok || !payment?.id) {
+          return res.status(502).json({
+            success: false,
+            error: 'Could not verify your payment with Razorpay. Please try again in a minute.',
+          });
+        }
+
+        // Ownership: the payment must belong to this logged-in user
+        const notes = payment.notes && !Array.isArray(payment.notes) ? payment.notes : {};
+        const emails = [notes.userEmail, payment.email]
+          .filter(Boolean)
+          .map((e: any) => String(e).trim().toLowerCase());
+        const ownerOk =
+          String(notes.userId || '') === uid || (tokenEmail !== '' && emails.includes(tokenEmail));
+        if (!ownerOk) {
+          return res.status(403).json({ success: false, error: 'This payment does not belong to your account.' });
+        }
+
+        currency = getCurrencyConfig(String(payment.currency || 'INR')).code;
+        const cfg = getCurrencyConfig(currency);
+        const paidMinor = Number(payment.amount) || 0;
+        const refundedMinor = Number(payment.amount_refunded) || 0;
+        const paid = fromRazorpayMinorUnits(paidMinor, currency);
+        const roundAmt = (v: number) => {
+          const f = Math.pow(10, cfg.decimals);
+          return Math.round(v * f) / f;
+        };
+
+        const startMs = Number(payment.created_at) * 1000;
+        const start = new Date(startMs);
+        const cycle = normalizeValidCycle(record.billingCycle || userData.billingCycle);
+        const end = new Date(start);
+        end.setMonth(end.getMonth() + (CYCLE_MONTHS[cycle] || 1));
+        const DAY = 24 * 60 * 60 * 1000;
+        totalDays = Math.max(1, Math.round((end.getTime() - start.getTime()) / DAY));
+        daysUsed = Math.min(totalDays, Math.max(0, Math.floor((Date.now() - startMs) / DAY)));
+
+        const used = Math.min(paid, roundAmt((paid / totalDays) * daysUsed));
+        const wanted = roundAmt(Math.max(0, paid - used));
+
+        if (refundedMinor > 0) {
+          // Already (partly) refunded earlier: never refund twice
+          alreadyRefunded = true;
+          refundMajor = fromRazorpayMinorUnits(refundedMinor, currency);
+        } else if (payment.status !== 'captured') {
+          return res.status(400).json({
+            success: false,
+            error: 'Your payment is not captured yet, so it cannot be refunded right now.',
+          });
+        } else {
+          const refundMinor = Math.min(toRazorpayMinorUnits(wanted, currency), paidMinor - refundedMinor);
+          if (refundMinor > 0) {
+            const rfRes = await fetch(
+              `https://api.razorpay.com/v1/payments/${encodeURIComponent(record.paymentId)}/refund`,
+              {
+                method: 'POST',
+                headers: rzpHeaders,
+                body: JSON.stringify({
+                  amount: refundMinor,
+                  speed: 'optimum',
+                  notes: {
+                    userId: uid,
+                    userEmail: tokenEmail,
+                    plan: String(userData.plan),
+                    reason: 'membership_cancel_pro_rata',
+                    daysUsed: String(daysUsed),
+                    totalDays: String(totalDays),
+                  },
+                }),
+              }
+            );
+            const rf = (await rfRes.json().catch(() => ({}))) as any;
+            if (!rfRes.ok || !rf?.id) {
+              console.error('[Cancel] Razorpay refund failed:', rf);
+              return res.status(502).json({
+                success: false,
+                error: String(rf?.error?.description || 'Refund could not be created. Nothing was changed. Please try again.'),
+              });
+            }
+            refundId = rf.id;
+            refundStatus = String(rf.status || 'pending');
+            refundMajor = fromRazorpayMinorUnits(Number(rf.amount) || refundMinor, currency);
+            refundDone = true;
+            markServerPaymentRefunded(record.paymentId, record.subscriptionId);
+          }
+        }
+      }
+
+      // Stop AutoPay mandate (best effort; the money part is already safe)
+      const subId = String(userData.subscriptionId || '');
+      if (subId.startsWith('sub_') && !subId.startsWith('sub_pref_')) {
+        try {
+          await fetch(`https://api.razorpay.com/v1/subscriptions/${encodeURIComponent(subId)}/cancel`, {
+            method: 'POST',
+            headers: rzpHeaders,
+            body: JSON.stringify({ cancel_at_cycle_end: 0 }),
+          });
+        } catch (subErr) {
+          console.warn('[Cancel] AutoPay cancel warning:', subErr);
+        }
+      }
+
+      // Save everything in Firestore (server-side, cannot be tampered with by the browser)
+      const nowIso = new Date().toISOString();
+      await db.runTransaction(async (tx: any) => {
+        const snap = await tx.get(userRef);
+        const d = snap.data() || {};
+        const hist: any[] = Array.isArray(d.paymentHistory) ? d.paymentHistory : [];
+        const updated = hist.map((item) =>
+          record && item?.paymentId === record.paymentId
+            ? {
+                ...item,
+                status: 'cancelled_refunded',
+                refundAmount: refundMajor,
+                refundId,
+                cancelledAt: nowIso,
+                daysUsed,
+              }
+            : item
+        );
+        tx.update(userRef, {
+          plan: 'free',
+          billingCycle: adminFs.FieldValue.delete(),
+          planExpiresAt: adminFs.FieldValue.delete(),
+          autoPayEnabled: false,
+          autoPayStatus: 'cancelled',
+          autoPayUpdatedAt: nowIso,
+          paymentHistory: updated,
+          updatedAt: nowIso,
+        });
+      });
+
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({
+        success: true,
+        mode: 'razorpay_api',
+        paymentId: record?.paymentId,
+        refundId,
+        status: refundStatus,
+        currency,
+        refundAmount: refundMajor,
+        daysUsed,
+        totalDays,
+        refunded: refundDone,
+        alreadyRefunded,
+      });
+    } catch (err) {
+      console.error('[/api/membership/cancel] error:', err);
+      return res.status(500).json({ success: false, error: 'Something went wrong while cancelling. Please try again.' });
+    } finally {
+      if (lockedUid) cancelInFlight.delete(lockedUid);
+    }
+  });
+
   app.post('/api/refund', async (req, res) => {
     try {
       const {
