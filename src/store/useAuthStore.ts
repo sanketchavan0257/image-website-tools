@@ -269,7 +269,7 @@ interface AuthStoreState {
     autoPayStatus: AutoPayStatus;
     subscriptionId?: string;
   }) => void;
-  cancelMembership: (refundInfo: { paymentId?: string; refundId?: string; refundAmount: number; daysUsed: number; mode?: string }) => void;
+  cancelMembership: (refundInfo: { paymentId?: string; refundId?: string; refundAmount: number; daysUsed: number; mode?: string; skipFirestoreSync?: boolean }) => void;
 
   // Admin panel operations
   getAllKnownUsers: () => UserProfile[];
@@ -904,7 +904,8 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
       saveStoredAccounts(accounts);
     }
 
-    if (user.id) {
+    // When the SERVER already saved the cancellation in Firestore, the browser must not write it again.
+    if (user.id && !refundInfo.skipFirestoreSync) {
       updateUserPlanInFirestore(user.id, 'free', {
         autoPayEnabled: false,
         autoPayStatus: 'cancelled',
