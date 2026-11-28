@@ -694,7 +694,22 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
     if (!user) return;
     const now = new Date().toISOString();
     const cycle: BillingCycle = paymentInfo?.billingCycle || 'monthly';
-    const planExpiresAt = plan === 'free' ? undefined : calculatePlanExpiryDate(cycle);
+
+    // Is this payment already recorded? (same pay_ id, or its sub_ placeholder from the last 2 days)
+    // If yes, keep the ORIGINAL payment date so re-applying it never restarts the membership clock.
+    const priorHistory = user.paymentHistory || [];
+    const priorRecord = paymentInfo?.paymentId
+      ? priorHistory.find(
+          (r) =>
+            r.paymentId === paymentInfo.paymentId ||
+            (paymentInfo.subscriptionId &&
+              r.paymentId === paymentInfo.subscriptionId &&
+              Date.now() - new Date(r.date).getTime() < 2 * 24 * 60 * 60 * 1000)
+        )
+      : undefined;
+    const priorDate = priorRecord?.date ? new Date(priorRecord.date) : null;
+    const paidIso = priorDate && !Number.isNaN(priorDate.getTime()) ? priorDate.toISOString() : now;
+    const planExpiresAt = plan === 'free' ? undefined : calculatePlanExpiryDate(cycle, new Date(paidIso));
     const autoPayEnabled = plan === 'free' ? false : paymentInfo?.autoPayEnabled ?? user.autoPayEnabled ?? false;
     const autoPayStatus: AutoPayStatus =
       plan === 'free'
@@ -711,7 +726,7 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
           billingCycle: cycle,
           amount: paymentInfo.amount ?? 0,
           currency: normalizedCurrency,
-          date: now,
+          date: paidIso,
           expiresAt: planExpiresAt,
           autoPay: autoPayEnabled,
           subscriptionId,
@@ -719,7 +734,14 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
       : null;
 
     const updatedHistory = newRecord
-      ? [newRecord, ...existingHistory.filter((r) => r.paymentId !== newRecord.paymentId)].slice(0, 20)
+      ? [
+          newRecord,
+          ...existingHistory.filter(
+            (r) =>
+              r.paymentId !== newRecord.paymentId &&
+              !(priorRecord && r.paymentId === priorRecord.paymentId)
+          ),
+        ].slice(0, 20)
       : existingHistory;
 
     const updated: UserProfile = {
@@ -747,7 +769,7 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
             lastPaymentId: paymentInfo.paymentId,
             lastPaymentAmount: paymentInfo.amount,
             lastPaymentCurrency: normalizedCurrency,
-            lastPaymentDate: now,
+            lastPaymentDate: paidIso,
           }
         : {}),
     };
@@ -775,7 +797,7 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
         account.lastPaymentId = paymentInfo.paymentId;
         account.lastPaymentAmount = paymentInfo.amount;
         account.lastPaymentCurrency = normalizedCurrency;
-        account.lastPaymentDate = now;
+        account.lastPaymentDate = paidIso;
       }
       saveStoredAccounts(accounts);
     }
