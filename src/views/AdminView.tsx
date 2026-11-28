@@ -6,7 +6,7 @@ import {
 } from '../store/useAuthStore';
 import { useImageStore } from '../store/useImageStore';
 import { UserProfile } from '../types/auth';
-import { getAllUsersFromFirestore, FirestoreUserData } from '../services/firestoreService';
+import { getAllUsersFromFirestore, getAdminUsersIssue, FirestoreUserData } from '../services/firestoreService';
 import {
   getBillingCycleOption,
   getPlanCyclePrice,
@@ -118,6 +118,8 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
 
   const [activeSection, setActiveSection] = useState<AdminSectionTab>('users');
   const [usersList, setUsersList] = useState<UserProfile[]>([]);
+  const [usersIssue, setUsersIssue] = useState<string | null>(null);
+  const [remoteUserCount, setRemoteUserCount] = useState<number | null>(null);
   const [isLoadingUsers, setIsLoadingUsers] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterTab, setFilterTab] = useState<FilterTab>('all');
@@ -154,6 +156,8 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
       } catch (err) {
         console.warn('Firestore admin user list notice:', err);
       }
+      setUsersIssue(getAdminUsersIssue());
+      setRemoteUserCount(remoteProfiles.length);
 
       const mergedMap = new Map<string, UserProfile>();
       for (const u of localUsers) {
@@ -660,6 +664,16 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
           <AdminAnalystView />
         ) : (
           <>
+            {/* Why users are missing (shown only when the Firestore user list could not load) */}
+            {usersIssue && (
+              <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs font-bold">
+                ⚠️ Firestore madhun users yet nahit: {usersIssue}
+              </div>
+            )}
+            {remoteUserCount !== null && !usersIssue && (
+              <p className="text-[11px] text-slate-500">Firestore users loaded: {remoteUserCount}</p>
+            )}
+
             {/* New payment alert */}
             {newPaymentAlert && (
               <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-sm font-bold flex items-center justify-between gap-3">
