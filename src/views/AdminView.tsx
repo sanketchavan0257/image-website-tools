@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   useAuthStore,
   isAdminUser,
@@ -16,6 +16,38 @@ import {
 } from '../services/razorpayService';
 import { formatCurrency, roundCurrencyAmount } from '../config/currencies';
 import { AdminAnalystView } from '../components/admin/AdminAnalystView';
+
+interface RecentPaymentRow {
+  paymentId: string;
+  name: string;
+  email: string;
+  plan: string;
+  amount: number;
+  currency: string;
+  date: string;
+  refunded: boolean;
+}
+
+// Latest real Razorpay payments (pay_...) across all users, newest first
+function buildRecentPayments(users: UserProfile[]): RecentPaymentRow[] {
+  const rows: RecentPaymentRow[] = [];
+  for (const u of users) {
+    for (const r of u.paymentHistory || []) {
+      if (!r?.paymentId || !r.paymentId.startsWith('pay_') || r.paymentId.startsWith('pay_usr_')) continue;
+      rows.push({
+        paymentId: r.paymentId,
+        name: u.name || '',
+        email: u.email || '',
+        plan: String(r.plan || ''),
+        amount: Number(r.amount) || 0,
+        currency: r.currency || 'INR',
+        date: r.date,
+        refunded: r.status === 'cancelled_refunded' || r.status === 'refund_pending',
+      });
+    }
+  }
+  return rows.sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 10);
+}
 import {
   ArrowLeft,
   Shield,
@@ -111,8 +143,8 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
     refundId?: string;
   } | null>(null);
 
-  const loadAllUsers = useCallback(async () => {
-    setIsLoadingUsers(true);
+  const loadAllUsers = useCallback(async (silent: boolean = false) => {
+    if (!silent) setIsLoadingUsers(true);
     try {
       const localUsers = getAllKnownUsers();
       let remoteProfiles: UserProfile[] = [];
@@ -161,6 +193,39 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
       loadAllUsers();
     }
   }, [isAdmin, loadAllUsers]);
+
+  // Auto-refresh every 30s while the admin panel is open (silent: no spinner)
+  useEffect(() => {
+    if (!isAdmin) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void loadAllUsers(true);
+      }
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [isAdmin, loadAllUsers]);
+
+  // Tell the admin when a NEW payment appears after the first load
+  const seenPaymentIdsRef = useRef<Set<string> | null>(null);
+  const [newPaymentAlert, setNewPaymentAlert] = useState<string | null>(null);
+  useEffect(() => {
+    if (usersList.length === 0) return;
+    const rows = buildRecentPayments(usersList);
+    const ids = new Set(rows.map((r) => r.paymentId));
+    if (seenPaymentIdsRef.current === null) {
+      seenPaymentIdsRef.current = ids;
+      return;
+    }
+    const seen = seenPaymentIdsRef.current;
+    const fresh = rows.filter((r) => !seen.has(r.paymentId));
+    if (fresh.length > 0) {
+      const f = fresh[0];
+      setNewPaymentAlert(
+        `New payment: ${f.email || f.name} bought ${f.plan.toUpperCase()} (${formatCurrency(f.amount, f.currency)})`
+      );
+    }
+    ids.forEach((id) => seen.add(id));
+  }, [usersList]);
 
   const getUserPaidInfo = (target: UserProfile) => {
     const history = target.paymentHistory || [];
@@ -441,6 +506,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
   // Stats
   const totalUsers = usersList.length;
   const paidUsers = usersList.filter((u) => u.plan !== 'free');
+  const recentPayments = buildRecentPayments(usersList);
   const autoPayUsers = usersList.filter((u) => u.autoPayEnabled);
   const revenueByCurrency = paidUsers.reduce<Record<string, number>>((acc, u) => {
     const info = getUserPaidInfo(u);
@@ -540,7 +606,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
             <button
               type="button"
               disabled={isLoadingUsers}
-              onClick={loadAllUsers}
+              onClick={() => loadAllUsers()}
               className="px-4 py-2.5 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-800 text-xs font-extrabold shadow-2xs flex items-center justify-center gap-2 cursor-pointer transition-all self-start sm:self-auto"
             >
               <RefreshCw className={`w-4 h-4 text-indigo-600 ${isLoadingUsers ? 'animate-spin' : ''}`} />
@@ -594,6 +660,51 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
           <AdminAnalystView />
         ) : (
           <>
+            {/* New payment alert */}
+            {newPaymentAlert && (
+              <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-sm font-bold flex items-center justify-between gap-3">
+                <span>🔔 {newPaymentAlert}</span>
+                <button
+                  type="button"
+                  onClick={() => setNewPaymentAlert(null)}
+                  className="text-xs font-extrabold underline cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {/* Recent Payments */}
+            <div className="bg-white rounded-3xl border border-slate-200/90 p-5 shadow-2xs">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-black text-slate-900">Recent Payments</h2>
+                <span className="text-[11px] text-slate-500">Auto-refreshes every 30s</span>
+              </div>
+              {recentPayments.length === 0 ? (
+                <p className="text-xs text-slate-500">No payments yet.</p>
+              ) : (
+                <ul className="divide-y divide-slate-100">
+                  {recentPayments.map((p) => (
+                    <li key={p.paymentId} className="py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <div className="min-w-0">
+                        <div className="font-extrabold text-slate-900 truncate">{p.name || p.email}</div>
+                        <div className="text-slate-500 truncate">
+                          {p.email} · {p.paymentId}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="font-extrabold text-slate-900">
+                          {p.plan.toUpperCase()} · {formatCurrency(p.amount, p.currency)}
+                          {p.refunded ? ' (refunded)' : ''}
+                        </div>
+                        <div className="text-slate-500">{new Date(p.date).toLocaleString('en-IN')}</div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
             {/* Success Action Banner */}
             {actionBanner && (
               <div className="p-5 rounded-3xl bg-emerald-50 border border-emerald-200 text-emerald-950 flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in">
