@@ -1053,3 +1053,36 @@ export async function fetchRefundLiveStatus(refundId: string): Promise<RefundLiv
     return { known: false, status: 'unknown' };
   }
 }
+
+export interface ServerCancelResult {
+  success: boolean;
+  error?: string;
+  mode?: string;
+  paymentId?: string;
+  refundId?: string;
+  status?: string;
+  currency?: string;
+  refundAmount?: number;
+  daysUsed?: number;
+  totalDays?: number;
+  refunded?: boolean;
+  alreadyRefunded?: boolean;
+}
+
+/** Cancels the membership on the SERVER. The browser sends no amount and no date. */
+export async function cancelMembershipOnServer(idToken: string): Promise<ServerCancelResult> {
+  try {
+    const res = await fetch('/api/membership/cancel', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const data = (await res.json().catch(() => ({}))) as ServerCancelResult;
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || 'Could not cancel the membership. Please try again.' };
+    }
+    return data;
+  } catch {
+    return { success: false, error: 'Network problem. Please check your connection and try again.' };
+  }
+}
