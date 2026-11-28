@@ -63,6 +63,11 @@ function formatPaidDateTime(iso: string | undefined, withZone = false): string {
 }
 
 
+// A real Razorpay payment id looks like pay_AbC123... (subscription ids are sub_..., local ones pay_usr_...)
+function isRealRazorpayPaymentId(id?: string): boolean {
+  return Boolean(id && /^pay_[A-Za-z0-9]+$/.test(id) && !id.startsWith('pay_usr_'));
+}
+
 // Adds N working days (Mon-Fri) to a date
 function addWorkingDays(from: Date, days: number): Date {
   const d = new Date(from);
@@ -146,11 +151,11 @@ function RefundStatusModal({ record, onClose }: { record: PaymentRecord; onClose
     <div
       role="dialog"
       aria-modal="true"
-      className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-slate-900/70 backdrop-blur-xs"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-xs"
       onClick={onClose}
     >
       <div
-        className="relative w-full h-full max-w-none rounded-none overflow-y-auto sm:h-auto sm:max-h-[90vh] sm:max-w-md sm:rounded-3xl bg-white shadow-2xl border border-slate-100 p-6 sm:p-7 space-y-5"
+        className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-100 p-6 sm:p-7 space-y-5"
         onClick={(e) => e.stopPropagation()}
       >
         <button
@@ -282,7 +287,11 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
   const paymentRecords: PaymentRecord[] = (() => {
     if (!user) return [];
     if (user.paymentHistory && user.paymentHistory.length > 0) {
-      return user.paymentHistory;
+      // Hide Rs 0 AutoPay-mandate rows (sub_...); the real payment row (pay_...) is the invoice.
+      const visible = user.paymentHistory.filter(
+        (r) => !(String(r.paymentId || '').startsWith('sub_') && !(Number(r.amount) > 0))
+      );
+      return visible.length > 0 ? visible : user.paymentHistory;
     }
     if (user.lastPaymentId) {
       return [
@@ -302,11 +311,21 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
   })();
 
   // Determine the active paid record, its exact currency, & pro-rata refund breakdown
-  const latestPaidRecord = paymentRecords.find((r) => r.status !== 'cancelled_refunded' && r.status !== 'refund_pending');
+  const latestPaidRecord = paymentRecords.find(
+    (r) =>
+      r.status !== 'cancelled_refunded' &&
+      r.status !== 'refund_pending' &&
+      isRealRazorpayPaymentId(r.paymentId) &&
+      Number(r.amount) > 0
+  );
   const activeCurrency = latestPaidRecord?.currency || user?.lastPaymentCurrency || 'INR';
   const activeCurrencyCfg = getCurrencyConfig(activeCurrency);
-  const realPaymentId = latestPaidRecord?.paymentId || user?.lastPaymentId || '';
-  const hasRealPayment = Boolean(realPaymentId && !realPaymentId.startsWith('pay_usr_'));
+  const realPaymentId = isRealRazorpayPaymentId(latestPaidRecord?.paymentId)
+    ? (latestPaidRecord?.paymentId as string)
+    : isRealRazorpayPaymentId(user?.lastPaymentId)
+    ? (user?.lastPaymentId as string)
+    : '';
+  const hasRealPayment = isRealRazorpayPaymentId(realPaymentId);
   const activePaidAmount = (() => {
     if (!hasRealPayment) return 0;
     if (latestPaidRecord?.amount && latestPaidRecord.amount > 0) return latestPaidRecord.amount;
