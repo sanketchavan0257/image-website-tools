@@ -2915,7 +2915,13 @@ async function startServer() {
         });
 
         // Save the membership in Firestore right now (no need for the customer to reopen the site)
-        if (livePayment?.status !== 'authorized') {
+        // Only a real captured payment (pay_...) with an amount may activate the plan.
+        // subscription.* events without a payment carry only sub_... and must NOT create a Rs 0 record.
+        if (
+          livePayment?.status !== 'authorized' &&
+          /^pay_[A-Za-z0-9]+$/.test(effectivePaymentId) &&
+          resolvedAmount > 0
+        ) {
           await activateMembershipInFirestore({
             paymentId: effectivePaymentId,
             subscriptionId,
