@@ -29,7 +29,7 @@ interface RecentPaymentRow {
 }
 
 // Latest real Razorpay payments (pay_...) across all users, newest first
-function buildRecentPayments(users: UserProfile[]): RecentPaymentRow[] {
+function buildRecentPayments(users: UserProfile[], limit: number = 10): RecentPaymentRow[] {
   const rows: RecentPaymentRow[] = [];
   for (const u of users) {
     for (const r of u.paymentHistory || []) {
@@ -46,7 +46,7 @@ function buildRecentPayments(users: UserProfile[]): RecentPaymentRow[] {
       });
     }
   }
-  return rows.sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 10);
+  return rows.sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, limit);
 }
 import {
   ArrowLeft,
@@ -71,13 +71,14 @@ import {
   BarChart3,
   ChevronLeft,
   ChevronRight,
+  History as HistoryIcon,
 } from 'lucide-react';
 
 interface AdminViewProps {
   onNavigate: (path: string) => void;
 }
 
-type AdminSectionTab = 'users' | 'analyst';
+type AdminSectionTab = 'users' | 'analyst' | 'history';
 type AdminActionMode = 'only_autopay' | 'autopay_full_refund' | 'pro_rata_cancel';
 type FilterTab = 'all' | 'paid' | 'autopay' | 'free';
 
@@ -130,6 +131,14 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
   useEffect(() => {
     setCurrentPage(1);
   }, [filterTab, searchQuery]);
+
+  // History: search + pagination
+  const HISTORY_PER_PAGE = 10;
+  const [historySearch, setHistorySearch] = useState('');
+  const [historyPage, setHistoryPage] = useState(1);
+  useEffect(() => {
+    setHistoryPage(1);
+  }, [historySearch]);
 
   // Action modal state
   const [modalState, setModalState] = useState<{
@@ -510,7 +519,6 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
   // Stats
   const totalUsers = usersList.length;
   const paidUsers = usersList.filter((u) => u.plan !== 'free');
-  const recentPayments = buildRecentPayments(usersList);
   const autoPayUsers = usersList.filter((u) => u.autoPayEnabled);
   const revenueByCurrency = paidUsers.reduce<Record<string, number>>((acc, u) => {
     const info = getUserPaidInfo(u);
@@ -545,6 +553,25 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
   const totalPages = Math.max(1, Math.ceil(filteredUsers.length / USERS_PER_PAGE));
   const safePage = Math.min(currentPage, totalPages);
   const pagedUsers = filteredUsers.slice((safePage - 1) * USERS_PER_PAGE, safePage * USERS_PER_PAGE);
+
+  // History (all payments) + Search + Pagination
+  const allPayments = buildRecentPayments(usersList, Infinity);
+  const historyQuery = historySearch.trim().toLowerCase();
+  const filteredPayments = historyQuery
+    ? allPayments.filter(
+        (p) =>
+          p.name.toLowerCase().includes(historyQuery) ||
+          p.email.toLowerCase().includes(historyQuery) ||
+          p.paymentId.toLowerCase().includes(historyQuery) ||
+          p.plan.toLowerCase().includes(historyQuery)
+      )
+    : allPayments;
+  const historyTotalPages = Math.max(1, Math.ceil(filteredPayments.length / HISTORY_PER_PAGE));
+  const safeHistoryPage = Math.min(historyPage, historyTotalPages);
+  const pagedPayments = filteredPayments.slice(
+    (safeHistoryPage - 1) * HISTORY_PER_PAGE,
+    safeHistoryPage * HISTORY_PER_PAGE
+  );
 
   // Modal breakdown computation
   const modalBreakdown = modalState
@@ -606,16 +633,30 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
             </p>
           </div>
 
-          {activeSection === 'users' && (
-            <button
-              type="button"
-              disabled={isLoadingUsers}
-              onClick={() => loadAllUsers()}
-              className="px-4 py-2.5 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-800 text-xs font-extrabold shadow-2xs flex items-center justify-center gap-2 cursor-pointer transition-all self-start sm:self-auto"
-            >
-              <RefreshCw className={`w-4 h-4 text-indigo-600 ${isLoadingUsers ? 'animate-spin' : ''}`} />
-              <span>Sync Users</span>
-            </button>
+          {activeSection !== 'analyst' && (
+            <div className="flex items-center gap-2 self-start sm:self-auto">
+              <button
+                type="button"
+                disabled={isLoadingUsers}
+                onClick={() => loadAllUsers()}
+                className="px-4 py-2.5 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-800 text-xs font-extrabold shadow-2xs flex items-center justify-center gap-2 cursor-pointer transition-all"
+              >
+                <RefreshCw className={`w-4 h-4 text-indigo-600 ${isLoadingUsers ? 'animate-spin' : ''}`} />
+                <span>Sync Users</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSection(activeSection === 'history' ? 'users' : 'history')}
+                className={`px-4 py-2.5 rounded-xl border text-xs font-extrabold shadow-2xs flex items-center justify-center gap-2 cursor-pointer transition-all ${
+                  activeSection === 'history'
+                    ? 'bg-indigo-600 border-indigo-600 text-white'
+                    : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-800'
+                }`}
+              >
+                <HistoryIcon className={`w-4 h-4 ${activeSection === 'history' ? 'text-white' : 'text-indigo-600'}`} />
+                <span>History</span>
+              </button>
+            </div>
           )}
         </div>
 
@@ -662,6 +703,79 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
 
         {activeSection === 'analyst' ? (
           <AdminAnalystView />
+        ) : activeSection === 'history' ? (
+          <div className="bg-white rounded-3xl border border-slate-200/90 p-5 shadow-2xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-black text-slate-900">Payment History</h2>
+                <span className="text-[11px] text-slate-500">
+                  {filteredPayments.length} payments • Auto-refreshes every 30s
+                </span>
+              </div>
+              <div className="relative w-full sm:w-72">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={historySearch}
+                  onChange={(e) => setHistorySearch(e.target.value)}
+                  placeholder="Search email, name, payment ID, plan..."
+                  className="w-full pl-9 pr-3.5 py-2 rounded-xl bg-white border border-slate-200 text-xs font-medium text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400"
+                />
+              </div>
+            </div>
+
+            {filteredPayments.length === 0 ? (
+              <p className="text-xs text-slate-500 py-6 text-center">
+                {historyQuery ? 'No matching payments found.' : 'No payments yet.'}
+              </p>
+            ) : (
+              <ul className="divide-y divide-slate-100">
+                {pagedPayments.map((p) => (
+                  <li key={p.paymentId} className="py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="min-w-0">
+                      <div className="font-extrabold text-slate-900 truncate">{p.name || p.email}</div>
+                      <div className="text-slate-500 truncate">
+                        {p.email} · {p.paymentId}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-extrabold text-slate-900">
+                        {p.plan.toUpperCase()} · {formatCurrency(p.amount, p.currency)}
+                        {p.refunded ? ' (refunded)' : ''}
+                      </div>
+                      <div className="text-slate-500">{new Date(p.date).toLocaleString('en-IN')}</div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {filteredPayments.length > HISTORY_PER_PAGE && (
+              <div className="flex items-center justify-between gap-3 pt-2">
+                <button
+                  type="button"
+                  disabled={safeHistoryPage === 1}
+                  onClick={() => setHistoryPage(safeHistoryPage - 1)}
+                  className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                  <span>Prev</span>
+                </button>
+                <span className="text-xs font-semibold text-slate-500">
+                  Page {safeHistoryPage} / {historyTotalPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={safeHistoryPage === historyTotalPages}
+                  onClick={() => setHistoryPage(safeHistoryPage + 1)}
+                  className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  <span>Next</span>
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+          </div>
         ) : (
           <>
             {/* Why users are missing (shown only when the Firestore user list could not load) */}
@@ -687,37 +801,6 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate }) => {
                 </button>
               </div>
             )}
-
-            {/* Recent Payments */}
-            <div className="bg-white rounded-3xl border border-slate-200/90 p-5 shadow-2xs">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-black text-slate-900">Recent Payments</h2>
-                <span className="text-[11px] text-slate-500">Auto-refreshes every 30s</span>
-              </div>
-              {recentPayments.length === 0 ? (
-                <p className="text-xs text-slate-500">No payments yet.</p>
-              ) : (
-                <ul className="divide-y divide-slate-100">
-                  {recentPayments.map((p) => (
-                    <li key={p.paymentId} className="py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
-                      <div className="min-w-0">
-                        <div className="font-extrabold text-slate-900 truncate">{p.name || p.email}</div>
-                        <div className="text-slate-500 truncate">
-                          {p.email} · {p.paymentId}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="font-extrabold text-slate-900">
-                          {p.plan.toUpperCase()} · {formatCurrency(p.amount, p.currency)}
-                          {p.refunded ? ' (refunded)' : ''}
-                        </div>
-                        <div className="text-slate-500">{new Date(p.date).toLocaleString('en-IN')}</div>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
 
             {/* Success Action Banner */}
             {actionBanner && (
