@@ -315,7 +315,11 @@ export default function App() {
           };
           paymentHistory = [
             newRecord,
-            ...(paymentHistory || []).filter((r) => r.paymentId !== newRecord.paymentId),
+            ...(paymentHistory || []).filter(
+              (r) =>
+                r.paymentId !== newRecord.paymentId &&
+                !(recPay.subscriptionId && r.paymentId === recPay.subscriptionId)
+            ),
           ].slice(0, 20);
 
           updateUserPlanInFirestore(fbUser.uid, plan, {
