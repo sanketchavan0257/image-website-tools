@@ -211,8 +211,18 @@ export async function getUserFromFirestore(userId: string): Promise<FirestoreUse
 /**
  * Lists all user profiles from Cloud Firestore (Admin only per firestore.rules)
  */
+let lastAdminUsersIssue: string | null = null;
+
+/** Why the last admin "load all users" failed (null = it worked). Shown in the admin panel. */
+export function getAdminUsersIssue(): string | null {
+  return lastAdminUsersIssue;
+}
+
 export async function getAllUsersFromFirestore(): Promise<FirestoreUserData[]> {
+  lastAdminUsersIssue = null;
   if (!auth.currentUser) {
+    lastAdminUsersIssue =
+      'Firebase login nahi. Admin email ne website var Google (verified) login karun parat ye.';
     return [];
   }
   const path = 'users';
@@ -229,9 +239,21 @@ export async function getAllUsersFromFirestore(): Promise<FirestoreUserData[]> {
       }
     } else {
       console.warn('Admin users API returned', res.status);
+      if (res.status === 403) {
+        lastAdminUsersIssue =
+          'Server ne tula admin manla nahi (403). Render madhe ADMIN_EMAIL barobar ahe ka ani tya email ne verified (Google) login kela ahe ka te bagh.';
+      } else if (res.status === 503) {
+        lastAdminUsersIssue =
+          'Server var Firebase Admin chalu nahi (503). Render madhe FIREBASE_SERVICE_ACCOUNT barobar ahe ka ani Logs madhe "Firebase Admin init failed" ahe ka te bagh.';
+      } else if (res.status === 401) {
+        lastAdminUsersIssue = 'Login token milala nahi (401). Logout karun parat login kar.';
+      } else {
+        lastAdminUsersIssue = `Server error ${res.status}. Render Logs madhe "[Admin] /api/admin/users failed" bagh.`;
+      }
     }
   } catch (apiErr) {
     console.warn('Admin users API failed, falling back to direct Firestore read:', apiErr);
+    lastAdminUsersIssue = 'Server shi sampark zhala nahi. Internet kinva Render service chalu ahe ka te bagh.';
   }
   // 2) Fallback: read directly from Firestore (needs admin rules to pass)
   try {
@@ -242,6 +264,9 @@ export async function getAllUsersFromFirestore(): Promise<FirestoreUserData[]> {
     }));
   } catch (err) {
     handleFirestoreError(err, OperationType.LIST, path);
+    if (!lastAdminUsersIssue) {
+      lastAdminUsersIssue = 'Firestore rules ne users vachayla nakar dila.';
+    }
     return [];
   }
 }
