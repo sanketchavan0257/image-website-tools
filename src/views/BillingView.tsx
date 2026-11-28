@@ -11,9 +11,11 @@ import {
   openDirectRazorpayCheckout,
   fetchRefundLiveStatus,
   RefundLiveStatus,
+  cancelMembershipOnServer,
 } from '../services/razorpayService';
 import { formatCurrency, getCurrencyConfig } from '../config/currencies';
 import { PaymentRecord } from '../types/auth';
+import { auth } from '../services/firebase';
 import {
   CreditCard,
   ShieldCheck,
@@ -357,57 +359,30 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
     setIsProcessingCancel(true);
 
     try {
-      // Stop AutoPay mandate first if an active subscription exists
-      if (user.autoPayEnabled || user.subscriptionId) {
-        await cancelAutoPaySubscription({
-          subscriptionId: user.subscriptionId,
-          cancelAtCycleEnd: false,
-        });
+      // The SERVER decides the refund (amount, days, plan). The browser only says "cancel".
+      const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : '';
+      if (!idToken) {
+        setCancelError('Please log out, log in again, and then cancel.');
+        return;
       }
 
-      let finalRefundAmount = hasRealPayment ? refundBreakdown.refundAmount : 0;
-      let finalRefundCurrency = activeCurrency;
-      let finalRefundId = `rfnd_nopay_${Date.now()}`;
-      let finalMode: string | undefined = 'no_refund_needed';
-      let finalStatus: string | undefined = 'processed';
-
-      if (hasRealPayment && refundBreakdown.refundAmount > 0) {
-        const apiRes = await requestProRataRefund({
-          paymentId: realPaymentId,
-          refundAmount: refundBreakdown.refundAmount,
-          currency: activeCurrency,
-          plan: currentPlan,
-          billingCycle: user.billingCycle || 'monthly',
-          userId: user.id,
-          userEmail: user.email,
-          daysUsed: refundBreakdown.daysUsed,
-          totalDays: refundBreakdown.totalDays,
-        });
-
-        if (!apiRes.success) {
-          setCancelError(apiRes.error || 'रद्द करताना आणि रिफंड प्रोसेस करताना अडचण आली. कृपया पुन्हा प्रयत्न करा.');
-          return;
-        }
-
-        finalRefundId = apiRes.refundId || `rfnd_${Date.now()}`;
-        finalMode = apiRes.mode;
-        finalStatus = apiRes.status;
-        if (apiRes.currency) {
-          finalRefundCurrency = apiRes.currency;
-        }
-        if (typeof apiRes.refundAmount === 'number') {
-          finalRefundAmount = apiRes.refundAmount;
-        } else if (typeof apiRes.refundAmountINR === 'number') {
-          finalRefundAmount = apiRes.refundAmountINR;
-        }
+      const res = await cancelMembershipOnServer(idToken);
+      if (!res.success) {
+        setCancelError(res.error || 'Could not cancel the membership. Please try again.');
+        return;
       }
+
+      const finalRefundAmount = res.refundAmount ?? 0;
+      const finalRefundCurrency = res.currency || activeCurrency;
+      const finalRefundId = res.refundId || `rfnd_none_${Date.now()}`;
 
       cancelMembership({
-        paymentId: hasRealPayment ? realPaymentId : undefined,
+        paymentId: res.paymentId,
         refundId: finalRefundId,
         refundAmount: finalRefundAmount,
-        daysUsed: refundBreakdown.daysUsed,
-        mode: finalMode,
+        daysUsed: res.daysUsed ?? 0,
+        mode: 'razorpay_api',
+        skipFirestoreSync: true,
       });
       setPlan('free');
 
@@ -417,10 +392,10 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigate }) => {
         refundAmount: finalRefundAmount,
         currency: finalRefundCurrency,
         refundId: finalRefundId,
-        daysUsed: refundBreakdown.daysUsed,
-        totalDays: refundBreakdown.totalDays,
-        mode: finalMode,
-        status: finalStatus,
+        daysUsed: res.daysUsed ?? 0,
+        totalDays: res.totalDays ?? refundBreakdown.totalDays,
+        mode: 'razorpay_api',
+        status: res.status,
       });
     } finally {
       setIsProcessingCancel(false);
